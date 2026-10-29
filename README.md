@@ -39,6 +39,8 @@ cd ../whale-admin
 python3 -m py_compile server.py domain.py integrations.py proactive.py workspace.py
 ```
 
+发送集成测试需通过 `QQBOT_OUTBOUND` 指定已打补丁的插件，否则明确跳过。安装及完整验证步骤见 [聊天分条补丁](apps/qq-whale/patches/dsh-qqbot/README.md)。
+
 ## 协作
 
 开始任务、提交 PR、审查、合并和同步的固定流程见 [docs/COLLABORATION.md](docs/COLLABORATION.md)。

@@ -1,23 +1,20 @@
 /**
- * 聊天消息语义分段器（QQ Whale 本地增强 v2）
+ * 聊天消息语义分段器（QQ Whale 本地增强 v3）
  *
  * 目标：把“较长、包含多个完整句子/自然段/明显停顿”的普通聊天回复拆成
  * 2~5 条独立 QQ 消息；短回复、代码块、表格、列表、引用、标题保持一条。
  *
- * 与 v1 的差异：
- * - 长段落即使只有一个句号，也会在逗号/分号/冒号/破折号等自然停顿处分条；
- * - 分段基于原文索引切片，不重新拼接，空白、标点和顺序原样保留；
- * - 链接、行内代码、括号、中文引号、@ 标签和 URL 内部不切；
- * - 英文句子之间保留空格；中文句子直接相连。
+ * - 优先保留模型用空行分出的短消息，不再合回长段落；
+ * - 自动分条只在完整句子/换行处分，不把逗号连接的长句从中间拆开；
+ * - 分段基于原文索引切片，保留内容、标点和顺序；
+ * - 链接、行内代码、括号、中文引号和 @ 标签内部不切。
  */
 
-const SHORT_LIMIT = 65; // 低于该长度不拆；正常聊天短句保持一条
-const PARAGRAPH_LIMIT = 65; // 有多个自然段时，超过该长度才拆
-const TARGET_CHARS = 45; // 每条目标长度，接近真人 QQ 的一句话
-const MAX_MESSAGES = 4; // 普通长回复最多 4 条
-const MAX_MESSAGES_VERY_LONG = 5; // 很长回复最多 5 条，控制在 QQ 被动回复额度内
-const MIN_MESSAGE_CHARS = 8; // 过短分组并入相邻消息
-const CLAUSE_SPLIT_MIN = 60; // 单句超过该长度才按逗号等停顿拆分
+const SHORT_LIMIT = 40; // 一句说清的短回复保持一条
+const TARGET_CHARS = 28; // 自动分条的目标长度；完整句子可以超出
+const MAX_MESSAGES = 4;
+const MAX_MESSAGES_VERY_LONG = 5; // QQ 被动回复额度内兜底，不截掉剩余正文
+const MIN_MESSAGE_CHARS = 8;
 
 const STRUCTURED = [
   /```/,
@@ -30,7 +27,6 @@ const STRUCTURED = [
 ];
 
 const SENTENCE_END = new Set(['。', '！', '？', '!', '?', '…', '；', ';']);
-const CLAUSE_END = new Set(['，', ',', '；', ';', '：', ':']);
 const CLOSERS = new Set(['”', '’', '」', '』', '）', ')', '】', '》', '"', "'", '］', ']']);
 
 /**
@@ -43,15 +39,25 @@ export function splitChatMessages(input) {
   // 结构化内容保持原样，由原有 4500 字上限切分器兜底。
   if (STRUCTURED.some((re) => re.test(text))) return [text];
 
-  const units = expandUnits(text);
+  const units = tokenize(text);
   if (units.length < 2) return [text];
 
   const total = text.length;
-  const hasParagraphs = /\n[ \t]*\n/.test(text);
-  const threshold = hasParagraphs ? PARAGRAPH_LIMIT : SHORT_LIMIT;
-  if (total < threshold) return [text];
-
   const cap = total >= 300 ? MAX_MESSAGES_VERY_LONG : MAX_MESSAGES;
+  // 只认未受保护的空行：引号、括号或链接内的换行不会成为边界。
+  const paragraphs = [];
+  for (const unit of units) {
+    const previous = paragraphs.at(-1);
+    if (!previous || /\n[ \t]*\n/.test(text.slice(previous.at(-1).end, unit.start))) {
+      paragraphs.push([unit]);
+    } else previous.push(unit);
+  }
+  if (paragraphs.length >= 2 && paragraphs.length <= cap
+      && paragraphs.every((group) => group.at(-1).end - group[0].start <= SHORT_LIMIT)) {
+    return paragraphs.map((group) => text.slice(group[0].start, group.at(-1).end));
+  }
+  if (total < SHORT_LIMIT) return [text];
+
   const wanted = Math.min(
     cap,
     Math.max(2, Math.round(total / TARGET_CHARS)),
@@ -132,20 +138,6 @@ function looksLikeMeta(paragraph) {
   return score >= 3;
 }
 
-/** 先按句子/换行切分，再把过长的单句按自然停顿展开。 */
-function expandUnits(text) {
-  const base = tokenize(text);
-  const out = [];
-  for (const unit of base) {
-    if (unit.text.length >= CLAUSE_SPLIT_MIN) out.push(...splitClauses(text, unit.start, unit.end));
-    else out.push(unit);
-  }
-  if (out.length === 1 && text.length >= CLAUSE_SPLIT_MIN) {
-    return splitClauses(text, 0, text.length);
-  }
-  return out;
-}
-
 /**
  * 按完整句子和换行切分；跳过链接、行内代码、Markdown 链接、括号、
  * 中文引号和 <...> 标签内部。
@@ -181,45 +173,6 @@ function tokenize(text) {
     i += 1;
   }
   pushUnit(units, text, start, text.length);
-  return units;
-}
-
-/** 在长句内部的自然停顿处切分；只在受保护片段之外下刀。 */
-function splitClauses(text, from, to) {
-  const units = [];
-  let start = from;
-  let i = from;
-  while (i < to) {
-    const skip = protectedEnd(text, i);
-    if (skip > i) {
-      i = skip;
-      continue;
-    }
-    const ch = text[i];
-    let cut = 0;
-    if (ch === '—' && text[i + 1] === '—') cut = i + 2;
-    else if (ch === '…') {
-      cut = i + 1;
-      if (text[i + 1] === '…') cut += 1;
-    } else if (CLAUSE_END.has(ch)) {
-      const prev = text[i - 1] || '';
-      const next = text[i + 1] || '';
-      // 数字里的千分位/时间不当作停顿，例如 1,000、10:30
-      if (/[0-9]/.test(prev) && /[0-9]/.test(next)) {
-        i += 1;
-        continue;
-      }
-      cut = i + 1;
-    }
-    if (cut > 0) {
-      pushUnit(units, text, start, cut);
-      start = cut;
-      i = cut;
-      continue;
-    }
-    i += 1;
-  }
-  pushUnit(units, text, start, to);
   return units;
 }
 
