@@ -30,10 +30,11 @@ test('空行不拆开引号内的原话', () => {
   assert.deepEqual(splitChatMessages(text), [text]);
 });
 
-test('超过消息条数预算时保留全部内容', () => {
+test('默认不合并模型明确分出的消息，显式配置预算时仍不丢正文', () => {
   const text = Array.from({ length: 12 }, (_, i) => `第${i + 1}天还是想和你说声早安。`).join('\n\n');
   const parts = splitChatMessages(text);
-  assert.ok(parts.length <= 4);
+  assert.equal(parts.length, 12);
+  assert.ok(splitChatMessages(text, { maxMessages: 3 }).length <= 3);
   assert.equal(parts.map(stripSpace).join(''), stripSpace(text));
 });
 
@@ -45,12 +46,12 @@ test('前导元思考不会发给用户，普通正文保持不变', () => {
   assert.deepEqual(splitChatMessages('这个回答要简短吗？'), ['这个回答要简短吗？']);
 });
 
-test('长回复按完整句子拆成 2~4 条', () => {
+test('长回复按完整句子拆分且保留全部内容', () => {
   const text = '今天这道题其实不难。先看受力分析，判断物体到底受几个力，再判断运动方向。你刚才把摩擦力方向写反了，所以整道题的符号都反了。'
     + '另外，题干里的角度是斜面倾角，不是速度方向，这两个很容易混。下次先画图再算，把每个力的方向标出来，会稳很多。'
     + '还有，最后一步代入公式之前，先检查单位是不是统一。';
   const parts = splitChatMessages(text);
-  assert.ok(parts.length >= 2 && parts.length <= 4, `实际 ${parts.length} 条`);
+  assert.ok(parts.length >= 2, `实际 ${parts.length} 条`);
   assert.equal(parts.map(stripSpace).join(''), stripSpace(text));
   for (const part of parts.slice(0, -1)) {
     assert.match(part, /[。！？!?…]$/, '非最后一条应以完整句末标点结束');
@@ -63,7 +64,7 @@ test('多个自然段按语义分组', () => {
     + '第三段讲时间，今晚先跑一次演练，明天再正式切换。演练要覆盖迁移、校验和回滚，不能只看迁移成功。\n\n'
     + '第四段是收尾，切换后保留回滚包，出问题十分钟内能恢复。恢复流程也要提前写好，别等出事再临时想办法。';
   const parts = splitChatMessages(text);
-  assert.ok(parts.length >= 2 && parts.length <= 4);
+  assert.ok(parts.length >= 2);
   assert.equal(parts.map(stripSpace).join(''), stripSpace(text));
 });
 
@@ -84,10 +85,14 @@ test('链接和行内代码不会被截断', () => {
   assert.ok(parts.some((part) => part.includes('`npm run build -- --watch`')));
 });
 
-test('没有句末标点的长句不从中间硬拆', () => {
+test('超长逗号句只在转折处分开，关闭兜底时保留原句', () => {
   const text = '这是一段没有句号的超长文字，里面全是逗号，用来测试不会从句子中间硬拆的情况，因为它本来就是一个完整的长句，'
     + '拆开就会破坏语义和阅读节奏，所以应该保持一条消息，哪怕它看起来已经有点长了，也不应该为了分段而破坏完整性。';
-  assert.deepEqual(splitChatMessages(text), [text]);
+  const parts = splitChatMessages(text);
+  assert.equal(parts.length, 2);
+  assert.ok(parts[1].startsWith('所以'));
+  assert.equal(parts.join(''), text);
+  assert.deepEqual(splitChatMessages(text, { longSentenceChars: 0 }), [text]);
 });
 
 test('带编号列表的长回复保持完整', () => {
@@ -101,7 +106,7 @@ test('带编号列表的长回复保持完整', () => {
   assert.deepEqual(parts, [text]);
 });
 
-test('随机组合不丢字、不超四条、不重复', () => {
+test('随机组合不丢字、不重复', () => {
   const sentences = [
     '今天先把最要紧的那件事做完。',
     '剩下的任务可以往后排一排，不用一次全扛。',
@@ -120,7 +125,7 @@ test('随机组合不丢字、不超四条、不重复', () => {
     const count = 2 + Math.floor(random() * 7);
     const text = Array.from({ length: count }, () => sentences[Math.floor(random() * sentences.length)]).join('');
     const parts = splitChatMessages(text);
-    assert.ok(parts.length >= 1 && parts.length <= 4);
+    assert.ok(parts.length >= 1);
     assert.equal(parts.map(stripSpace).join(''), stripSpace(text));
     // 输入允许同一句出现多次；上面的全文比较验证没有额外重复或丢失。
   }

@@ -1,0 +1,9 @@
+{
+  "shortLimit": 36,
+  "targetChars": 28,
+  "longSentenceChars": 64,
+  "minMessageChars": 8,
+  "maxMessages": 0,
+  "messageDelayMs": 650,
+  "typingMsPerChar": 8
+}

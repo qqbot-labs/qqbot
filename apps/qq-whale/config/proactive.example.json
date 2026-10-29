@@ -1,1 +1,12 @@
-{"enabled": true, "peer": "0123456789abcdef0123456789abcdef", "idleMinutes": 180, "intervalMinutes": 90, "quietStart": "23:00", "quietEnd": "09:00", "mode": "ai", "text": "想起你啦，过来打个招呼。忙的话不用急着回我。", "appId": "YOUR_APP_ID"}
+{
+  "enabled": true,
+  "peer": "0123456789abcdef0123456789abcdef",
+  "idleMinutes": 0,
+  "intervalMinutes": 0,
+  "quietStart": "00:00",
+  "quietEnd": "00:00",
+  "mode": "ai",
+  "text": "想起你啦，过来打个招呼。忙的话不用急着回我。",
+  "appId": "YOUR_APP_ID",
+  "decisionIntervalMinutes": 0
+}

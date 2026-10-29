@@ -38,7 +38,7 @@
 #    --no-secrets：排除 .credentials.yaml 与 etc/，并抹掉 profiles/、settings.yaml 里的
 #                  凭据字段（可能过度脱敏），用于把备份放到较低信任的位置。
 #
-# 5) 磁盘上限：保留最近 WHALE_BACKUP_KEEP 份（默认 7），超出删除最旧的。
+# 5) 磁盘上限：保留最近 WHALE_BACKUP_KEEP 份（默认 0，不限保留份数），超出删除最旧的。
 #    删除前会打印待删列表，并且**只删本脚本自己生成的、位于 $WHALE_ROOT/backups 下、
 #    名字匹配 whale-*.tar.gz* 的文件**（绝对路径前缀校验，见 _safe_rm）。
 #
@@ -103,7 +103,7 @@ WHALE_WEB_PORT="${WHALE_WEB_PORT:-3080}"
 DSH_HOME="${DSH_HOME:-${WHALE_HOME}/.dsh}"
 
 BACKUP_DIR="${WHALE_BACKUP_DIR:-${WHALE_ROOT}/backups}"   # 备份输出目录（700）
-KEEP="${WHALE_BACKUP_KEEP:-7}"                            # 保留份数
+KEEP="${WHALE_BACKUP_KEEP:-0}"                            # 保留份数
 STABLE_RETRY="${WHALE_BACKUP_STABLE_RETRY:-3}"            # 稳定性检查重试次数
 STABLE_WAIT="${WHALE_BACKUP_STABLE_WAIT:-0.3}"            # 重试间隔（秒）
 HASH_LIMIT="${WHALE_BACKUP_HASH_LIMIT:-8388608}"          # 8MiB：超过不做内容哈希
@@ -162,7 +162,7 @@ whale-backup.sh —— QQ AI 机器人「小鲸鱼」一致性备份脚本
 环境变量（可选）:
   WHALE_HOME=/home/qqwhale      WHALE_ROOT=$WHALE_HOME/whale
   DSH_HOME=$WHALE_HOME/.dsh     WHALE_BACKUP_DIR=$WHALE_ROOT/backups
-  WHALE_BACKUP_KEEP=7           保留份数，超出删除最旧的（仅限本脚本生成的归档）
+  WHALE_BACKUP_KEEP=0           保留份数，0 不自动删除；正数时超出删除最旧的（仅限本脚本生成的归档）
   WHALE_ENCRYPT_TOOL=auto       auto|age|gpg
   WHALE_AGE_RECIPIENT=age1...   age 公钥（非交互环境下加密必填）
   WHALE_GPG_PASSPHRASE_FILE=... gpg 口令文件（非交互环境下加密必填）
@@ -818,7 +818,7 @@ prune_backups() {
   case "$keep" in
     ''|*[!0-9]*) warn "WHALE_BACKUP_KEEP='$keep' 非数字，按 1 处理"; keep=1 ;;
   esac
-  if [ "$keep" -lt 1 ]; then warn "WHALE_BACKUP_KEEP=$keep 非法，至少保留 1 份"; keep=1; fi
+  if [ "$keep" -eq 0 ]; then info "备份保留：不限份数，不自动删除"; return 0; fi
 
   local all=() line
   while IFS= read -r line; do

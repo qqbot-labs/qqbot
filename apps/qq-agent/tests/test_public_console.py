@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from qqagent.app import create_app
 
 
-@pytest.mark.parametrize('public_origin',['https://YOUR_VPS_IP:13843','https://qqbot.example.com'])
+@pytest.mark.parametrize('public_origin',['https://192.0.2.10:13843','https://qqbot.example.com'])
 def test_public_origin_https_login_csrf(tmp_path, monkeypatch,public_origin):
     monkeypatch.setenv('QQAGENT_PUBLIC_ORIGIN',public_origin)
     app=create_app(tmp_path,background=False)
@@ -26,7 +26,7 @@ def test_public_origin_https_login_csrf(tmp_path, monkeypatch,public_origin):
 
 def test_public_origin_default_denies(tmp_path,monkeypatch):
     monkeypatch.delenv('QQAGENT_PUBLIC_ORIGIN',raising=False)
-    with TestClient(create_app(tmp_path,background=False),base_url='https://YOUR_VPS_IP:13843') as c:
+    with TestClient(create_app(tmp_path,background=False),base_url='https://192.0.2.10:13843') as c:
         assert c.get('/').status_code==400
 
 

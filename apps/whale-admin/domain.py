@@ -13,10 +13,14 @@ MEDIA = ROOT / 'data/表情包'
 ENVFILE = ROOT / 'etc/qqbot.env'
 AUTHFILE = Path('/var/lib/whale-admin/auth.json')
 PREFS = ROOT / 'data/qqwhale/persona-preferences.json'
-PREF_MAX_ITEMS = 60
-PREF_MAX_CHARS = 300
+PREF_MAX_ITEMS = 0
+PREF_MAX_CHARS = 0
 PERSONA_HASH = '3aafe387ec338bdc6ce1381b59f83963b10a92d91927dcc36b4d307b14110dc6'
-PERSONA_MAX_BYTES = 32768
+PERSONA_MAX_BYTES = 0
+CHATFILE = ROOT / 'etc/chat-delivery.json'
+CHAT_DEFAULT = {'shortLimit':36,'targetChars':28,'longSentenceChars':64,'minMessageChars':8,'maxMessages':0,'messageDelayMs':650,'typingMsPerChar':8}
+def chat_bytes():return CHATFILE.read_bytes() if CHATFILE.exists() else b''
+def chat_config():return {**CHAT_DEFAULT,**(json.loads(chat_bytes()) if chat_bytes() else {})}
 LOCK = threading.RLock()
 
 class Error(Exception): pass
@@ -156,7 +160,7 @@ def atomic(path,data,owner=None):
 def snapshot(label):
     STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
     folder=STATE/'revisions'/stamp();folder.mkdir(parents=True,mode=0o700)
-    for name,path in [('profile.yml',PROFILE),('memory.json',MEMCFG),('qqbot.env',ENVFILE)]:
+    for name,path in [('profile.yml',PROFILE),('memory.json',MEMCFG),('qqbot.env',ENVFILE),('chat-delivery.json',CHATFILE)]:
         if path.exists(): shutil.copyfile(path,folder/name);os.chmod(folder/name,0o600)
     (folder/'meta.json').write_text(json.dumps({'label':label,'at':time.time()},ensure_ascii=False))
     return folder.name
@@ -170,7 +174,7 @@ def get_config():
     prefix=conf(rows,'persona')['prefix'];e=envvalues()
     mem=json.loads(MEMCFG.read_text()) if MEMCFG.exists() else {}
     models=[{'id':x.get('id'),'name':x.get('name',x.get('id')),'contextWindow':x.get('contextWindow'),'maxTokens':x.get('maxTokens'),'reasoningEfforts':reasoning_efforts(x)} for x in p['models']]
-    return {'revision':digest(PROFILE.read_bytes()+MEMCFG.read_bytes()+ENVFILE.read_bytes()),'model':{'baseURL':p['baseURL'],'id':m['id'],'name':m.get('name',m['id']),'contextWindow':m['contextWindow'],'maxTokens':m['maxTokens'],'reasoningEffort':effective_reasoning(m,d.get('reasoningEffort','off')),'reasoningEfforts':reasoning_efforts(m),'timeoutMs':p.get('timeoutMs',90000),'streamIdleTimeoutMs':p.get('streamIdleTimeoutMs',30000)},'compaction':{k:cp.get(k,v) for k,v in {'thresholdRatio':0.55,'retainRatio':0.25,'maxOverflowRetries':2}.items()},'qq':{'appid':e.get('QQBOT_APPID',''),'c2cMode':qq['access']['c2cMode'],'c2cAllow':qq['access'].get('c2cAllow',[]),'groupMode':qq['access'].get('groupMode','disabled'),'groupAllow':qq['access'].get('groupAllow',[]),'textChunkLimit':qq.get('textChunkLimit',4500),'processingTimeoutMs':qq.get('processingTimeoutMs',120000),'sessionIdleTimeout':qq.get('sessionIdleTimeout',1800000),'streaming':qq.get('streaming',False)},'sticker':copy.deepcopy(qq['sticker']),'memory':mem,'persona':persona_view(prefix),'credentials':{'qqSecret':bool(e.get('QQBOT_SECRET')),'modelKey':bool(e.get('WHALE_API_KEY'))},'availableModels':models,'settingsApplied':pending_status()}
+    return {'revision':digest(PROFILE.read_bytes()+MEMCFG.read_bytes()+ENVFILE.read_bytes()+chat_bytes()),'model':{'baseURL':p['baseURL'],'id':m['id'],'name':m.get('name',m['id']),'contextWindow':m['contextWindow'],'maxTokens':m['maxTokens'],'reasoningEffort':effective_reasoning(m,d.get('reasoningEffort','off')),'reasoningEfforts':reasoning_efforts(m),'timeoutMs':p.get('timeoutMs',90000),'streamIdleTimeoutMs':p.get('streamIdleTimeoutMs',30000)},'compaction':{k:cp.get(k,v) for k,v in {'thresholdRatio':0.55,'retainRatio':0.25,'maxOverflowRetries':2}.items()},'qq':{'appid':e.get('QQBOT_APPID',''),'c2cMode':qq['access']['c2cMode'],'c2cAllow':qq['access'].get('c2cAllow',[]),'groupMode':qq['access'].get('groupMode','disabled'),'groupAllow':qq['access'].get('groupAllow',[]),'textChunkLimit':qq.get('textChunkLimit',4500),'processingTimeoutMs':qq.get('processingTimeoutMs',120000),'sessionIdleTimeout':qq.get('sessionIdleTimeout',1800000),'streaming':qq.get('streaming',False),'maxQueue':qq.get('maxQueue',0)},'sticker':copy.deepcopy(qq['sticker']),'memory':mem,'chat':chat_config(),'persona':persona_view(prefix),'credentials':{'qqSecret':bool(e.get('QQBOT_SECRET')),'modelKey':bool(e.get('WHALE_API_KEY'))},'availableModels':models,'settingsApplied':pending_status()}
 
 def pending_status():
     marker=STATE/'applied.json'
@@ -179,8 +183,8 @@ def pending_status():
     return {'pendingRestart':current!=applied,'known':applied is not None}
 
 def validate_payload(body):
-    if set(body)-{'revision','model','compaction','qq','sticker','memory','credentials'}:raise Error('存在不支持的配置类别')
-    rules={'model':{'contextWindow':(32768,1000000),'maxTokens':(512,32000),'timeoutMs':(10000,180000),'streamIdleTimeoutMs':(5000,120000)},'compaction':{'thresholdRatio':(.2,.8),'retainRatio':(.1,.5),'maxOverflowRetries':(0,3)},'qq':{'textChunkLimit':(500,4500),'processingTimeoutMs':(30000,240000),'sessionIdleTimeout':(300000,86400000)},'memory':{'recallMax':(1,10),'recallCooldownSec':(0,3600),'minQueryChars':(2,100),'maxTextChars':(500,20000),'excludeRecent':(0,50),'minGapMs':(0,86400000)},'sticker':{'perTurnMax':(1,3),'perWindowSec':(10,3600),'maxPerWindow':(1,10),'dailyBudgetPerGroup':(0,100),'dupTTLHours':(1,720)}}
+    if set(body)-{'revision','model','compaction','qq','sticker','memory','credentials','chat'}:raise Error('存在不支持的配置类别')
+    rules={'model':{'contextWindow':(1,None),'maxTokens':(1,None),'timeoutMs':(1,None),'streamIdleTimeoutMs':(1,None)},'compaction':{'thresholdRatio':(.01,.99),'retainRatio':(0,.99),'maxOverflowRetries':(0,None)},'qq':{'textChunkLimit':(1,4500),'processingTimeoutMs':(1,None),'sessionIdleTimeout':(1,None),'maxQueue':(0,None)},'memory':{'recallMax':(0,None),'recallCooldownSec':(0,None),'minQueryChars':(0,None),'maxTextChars':(0,None),'excludeRecent':(0,None),'minGapMs':(0,None)},'sticker':{'perTurnMax':(0,None),'perWindowSec':(0,None),'maxPerWindow':(0,None),'dailyBudgetPerGroup':(0,None),'dupTTLHours':(0,None)},'chat':{k:(0,None) for k in CHAT_DEFAULT}}
     bools={'qq':{'streaming'},'sticker':{'collectEnabled','autoTagEnabled','gatesEnabled'},'memory':{'archiveEnabled','recallEnabled'}}
     extra={'model':{'reasoningEffort','id'},'qq':{'appid','c2cMode','c2cAllow','groupMode','groupAllow'},'credentials':{'qqSecret','modelKey'}}
     for section,values in body.items():
@@ -189,7 +193,7 @@ def validate_payload(body):
         for k,v in values.items():
             if k in rules.get(section,{}):
                 lo,hi=rules[section][k]
-                if type(v) not in (int,float) or not lo<=v<=hi or (section!='compaction' or k=='maxOverflowRetries') and not float(v).is_integer():raise Error('数值超出范围：'+k)
+                if type(v) not in (int,float) or not (lo<=v and (hi is None or v<=hi)) or (section!='compaction' or k=='maxOverflowRetries') and not float(v).is_integer():raise Error('数值超出范围：'+k)
             elif k in bools.get(section,set()):
                 if type(v)!=bool:raise Error('开关必须为布尔值：'+k)
             elif k in extra.get(section,set()):
@@ -198,7 +202,7 @@ def validate_payload(body):
                 elif k=='reasoningEffort' and v not in REASONING_LEVELS:raise Error('推理档位无效')
                 elif k=='c2cMode' and v not in ['disabled','allowlist','open']:raise Error('私聊模式无效')
                 elif k=='groupMode' and v not in ['disabled','allowlist']:raise Error('群聊仅允许关闭或白名单模式')
-                elif k in ['c2cAllow','groupAllow'] and (not isinstance(v,list) or len(v)>30 or not all(isinstance(i,str) and re.fullmatch(r'[a-fA-F0-9]{32}',i) for i in v)):raise Error('白名单必须是平台 32 位十六进制 ID')
+                elif k in ['c2cAllow','groupAllow'] and (not isinstance(v,list) or not all(isinstance(i,str) and re.fullmatch(r'[a-fA-F0-9]{32}',i) for i in v)):raise Error('白名单必须是平台 32 位十六进制 ID')
                 elif section=='credentials' and (not isinstance(v,str) or len(v)>300 or any(c in v for c in '\r\n\x00') or v and not re.fullmatch(r'[A-Za-z0-9_.-]{10,300}',v)):raise Error('凭据格式无效')
             else:raise Error('不允许修改：'+section+'.'+k)
 
@@ -226,7 +230,7 @@ def save_config(body):
         if k in ['id','reasoningEffort']:continue
         if k in ['contextWindow','maxTokens']:m[k]=v
         else:p[k]=v
-    if m['maxTokens']>=m['contextWindow']*.5:raise Error('输出预算必须小于上下文的一半')
+    if m['maxTokens']>=m['contextWindow']:raise Error('输出预算必须小于上下文窗口')
     cp.update(body.get('compaction',{}))
     if float(cp.get('retainRatio',.25))>=float(cp.get('thresholdRatio',.55)):raise Error('压缩保留比例必须小于触发比例')
     if float(cp.get('thresholdRatio',.55))*m['contextWindow']+m['maxTokens']>=m['contextWindow']:raise Error('压缩阈值和输出预算未留下足够上下文余量')
@@ -255,11 +259,12 @@ def save_config(body):
     revision=snapshot('保存配置')
     folder=STATE/'revisions'/revision
     try:
+        atomic(CHATFILE,(json.dumps({**chat_config(),**body.get('chat',{})},ensure_ascii=False,indent=2)+'\n').encode())
         atomic(PROFILE,text.encode())
         atomic(MEMCFG,(json.dumps(mem,ensure_ascii=False,indent=2)+'\n').encode())
         atomic(ENVFILE,(''.join(k+'='+v+'\n' for k,v in env.items())).encode())
     except Exception:
-        for n,pth in [('profile.yml',PROFILE),('memory.json',MEMCFG),('qqbot.env',ENVFILE)]:
+        for n,pth in [('profile.yml',PROFILE),('memory.json',MEMCFG),('qqbot.env',ENVFILE),('chat-delivery.json',CHATFILE)]:
             if (folder/n).exists():atomic(pth,(folder/n).read_bytes())
         raise
     audit('config.save')
@@ -282,7 +287,7 @@ def persona_save(body):
     normalized=text.replace('\r\n','\n').replace('\r','\n')
     new=normalized.replace('\n','\r\n') if style=='crlf' else normalized
     raw=new.encode()
-    if len(raw)>PERSONA_MAX_BYTES:raise Error('人格原文超过 32768 字节预算')
+    if PERSONA_MAX_BYTES and len(raw)>PERSONA_MAX_BYTES:raise Error('人格原文超过 32768 字节预算')
     lockpath=persona_lock_path()
     if raw==oldraw:
         lock=persona_lock()
@@ -393,39 +398,40 @@ def prefs_load():
     for x in items if isinstance(items,list) else []:
         if not isinstance(x,dict):continue
         text=re.sub(r'\s+',' ',str(x.get('text',''))).strip()
-        if not text or len(text)>PREF_MAX_CHARS:continue
+        if not text:continue
         key=text.lower()
         if key in seen:continue
         seen.add(key)
         ident=str(x.get('id',''))
         if not re.fullmatch(r'p-\d+-[a-z0-9]+',ident):ident='p-'+str(int(x.get('ts') or time.time()*1000))+'-'+os.urandom(3).hex()
         source=x.get('source') if x.get('source') in ['chat','chat-auto','admin'] else 'chat'
-        valid.append({'id':ident,'ts':int(x.get('ts') or time.time()*1000),'text':text,'source':source})
-    return valid[-PREF_MAX_ITEMS:]
+        valid.append({'id':ident,'ts':int(x.get('ts') or time.time()*1000),'text':text,'source':source,'kind':x.get('kind') if x.get('kind') in ['preference','fact','setting','relationship'] else 'preference','key':str(x.get('key') or ''),'history':x.get('history') if isinstance(x.get('history'),list) else []})
+    return valid
 
-def prefs_write(items,label):
+def prefs_write(items,label,revoked=None):
     STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
     folder=STATE/'persona-prefs-revisions';folder.mkdir(mode=0o700,parents=True,exist_ok=True)
     if PREFS.exists() and not PREFS.is_symlink():shutil.copyfile(PREFS,folder/(stamp()+'.json'))
-    raw=(json.dumps({'version':1,'items':items[-PREF_MAX_ITEMS:]},ensure_ascii=False,indent=2)+'\n').encode()
+    if revoked is None:
+        try:revoked=json.loads(PREFS.read_text()).get('revoked',[])
+        except (OSError,ValueError):revoked=[]
+    raw=(json.dumps({'version':1,'items':items,'revoked':revoked},ensure_ascii=False,indent=2)+'\n').encode()
     u=pwd.getpwnam('qqwhale')
     atomic(PREFS,raw,owner=(u.pw_uid,u.pw_gid));os.chmod(PREFS,0o600)
     audit(label)
     return prefs_view()
 
 def prefs_view():
-    return {'items':prefs_load(),'maxItems':PREF_MAX_ITEMS,'maxChars':PREF_MAX_CHARS,'revision':digest(PREFS.read_bytes()) if PREFS.exists() else ''}
+    return {'items':prefs_load(),'revoked':(json.loads(PREFS.read_text()).get('revoked',[]) if PREFS.exists() else []),'maxItems':PREF_MAX_ITEMS,'maxChars':PREF_MAX_CHARS,'revision':digest(PREFS.read_bytes()) if PREFS.exists() else ''}
 
 def prefs_add(args):
     if args.get('confirm') is not True:raise Error('需要确认后添加长期偏好')
     text=re.sub(r'\s+',' ',str(args.get('text',''))).strip()
     if not text:raise Error('偏好内容不能为空')
-    if len(text)>PREF_MAX_CHARS:raise Error('偏好内容不能超过 300 字')
     if '\x00' in text:raise Error('偏好内容包含非法字符')
     with prefs_lock():
         items=prefs_load()
         if any(x['text'].lower()==text.lower() for x in items):raise Error('这条长期偏好已经存在')
-        if len(items)>=PREF_MAX_ITEMS:raise Error('长期偏好最多 60 条，请先删除旧条目')
         items.append({'id':'p-'+str(int(time.time()*1000))+'-'+os.urandom(3).hex(),'ts':int(time.time()*1000),'text':text,'source':'admin'})
         result=prefs_write(items,'preferences.add')
     return {**result,'message':'长期人格偏好已添加，下一条消息开始生效。'}
@@ -437,7 +443,10 @@ def prefs_delete(args):
     with prefs_lock():
         items=prefs_load();kept=[x for x in items if x['id']!=ident]
         if len(kept)==len(items):raise Error('偏好不存在或已删除')
-        result=prefs_write(kept,'preferences.delete')
+        old=next(x for x in items if x['id']==ident)
+        revoked=json.loads(PREFS.read_text()).get('revoked',[])
+        if old.get('key'):revoked=[x for x in revoked if x.get('key')!=old['key']]+[{'key':old['key'],'kind':old.get('kind'),'ts':int(time.time()*1000)}]
+        result=prefs_write(kept,'preferences.delete',revoked)
     return {**result,'message':'长期人格偏好已删除，后续对话不再注入。'}
 
 def media_list(args):
@@ -582,7 +591,7 @@ def dispatch(method,args):
             revision=snapshot('恢复前备份')
             # Routine settings rollback must not revive a revoked QQ/API key.
             atomic(PROFILE,yaml.dump(candidate,Dumper=Dumper,allow_unicode=True,sort_keys=False,width=100000).encode())
-            for n,pth in [('memory.json',MEMCFG),*([('qqbot.env',ENVFILE)] if restore_credentials else [])]:
+            for n,pth in [('memory.json',MEMCFG),('chat-delivery.json',CHATFILE),*([('qqbot.env',ENVFILE)] if restore_credentials else [])]:
                 if (folder/n).exists():atomic(pth,(folder/n).read_bytes())
             audit('config.restore');return {'message':'配置已恢复，当前凭据保留。点击应用配置后生效。' if not restore_credentials else '配置与所选快照凭据已恢复，请确认平台密钥仍有效后应用。','backup':revision,'config':get_config()}
         if method=='logs':

@@ -9,12 +9,12 @@ import { safeMedia } from './whale-policy.mjs';
 const execute=promisify(execFile);
 const HERE=dirname(fileURLToPath(import.meta.url));
 export const ROOT=process.env.WHALE_ROOT||resolve(HERE,'..');
-const DEFAULT={enabled:true,model:'cn:deepseek-v4.1-flash',fallbackModel:'cn:glm-5v-turbo',gifFrames:6,maxImages:2,timeoutMs:35000};
+const DEFAULT={enabled:true,model:'cn:deepseek-v4.1-flash',fallbackModel:'cn:glm-5v-turbo',gifFrames:6,maxImages:0,timeoutMs:35000};
 const API_BASE=(process.env.WHALE_API_BASE||'https://api.example.com/v1').replace(/\/$/,'');
 export function visionConfig(){
   const parsed=JSON.parse(readFileSync(join(ROOT,'etc/vision-routing.json'),'utf8'));
   const c={...DEFAULT,...parsed};
-  if(typeof c.enabled!=='boolean'||![c.model,c.fallbackModel].every(m=>typeof m==='string'&&/^[A-Za-z0-9_./:-]{1,160}$/.test(m))||!Number.isInteger(c.gifFrames)||c.gifFrames<2||c.gifFrames>8||!Number.isInteger(c.maxImages)||c.maxImages<1||c.maxImages>3||!Number.isInteger(c.timeoutMs)||c.timeoutMs<10000||c.timeoutMs>45000)throw Error('视觉路由配置无效');
+  if(typeof c.enabled!=='boolean'||![c.model,c.fallbackModel].every(m=>typeof m==='string'&&/^[A-Za-z0-9_./:-]{1,160}$/.test(m))||!Number.isInteger(c.gifFrames)||c.gifFrames<1||!Number.isInteger(c.maxImages)||c.maxImages<0||!Number.isInteger(c.timeoutMs)||c.timeoutMs<1)throw Error('视觉路由配置无效');
   return c;
 }
 function key(){

@@ -13,6 +13,7 @@ if json.loads((root / 'package.json').read_text())['version'] != '1.10.9':
     sys.exit('Only reviewed version 1.10.9 is supported; audit another version before deploying.')
 policy = Path(__file__).with_name('whale-policy.mjs').read_bytes()
 specs = {
+    'features/sticker-gate.js': ('39b72579614bd97c82540b1cfa352c228efedc3a4cbeaca9def037571e63716e', [("perTurnMax: liveGates().perTurnMax ?? 0,", "perTurnMax: liveGates().enabled === true ? (liveGates().perTurnMax ?? 0) : 0,")], ''),
     'gateway/bootstrap.js': ('a99574ce4d28e81a1c5e0090f980edd00ffd50b8483f80f63c6202df84a4296b', [
         ('sendMedia: async (target, kind, source) => {',
          'sendMedia: async (target, kind, source) => {\n            source = safeMedia(kind, source, stickerDataDir);'),
@@ -23,6 +24,7 @@ specs = {
         ('onBlock: (_mCtx, reason) => {', "guild: { mode: 'disabled' },\n        onBlock: (_mCtx, reason) => {\n            captureBinding(_mCtx, dataRootOf(config));"),
         ('const all = [...buildCommandList({ manager, config }), ...ext];',
          "const all = buildCommandList({ manager, config }).filter(c => (Array.isArray(c.name) ? c.name : [c.name]).every(n => ['bot-help', 'bot-status', 'bot-reset', 'bot-clear', 'bot-new', 'new', 'bot-stop', 'bot-ping', 'bot-version', '答', 'ans'].includes(n)));"),
+        ('maxQueue: config.maxQueue,', 'maxQueue: config.maxQueue > 0 ? config.maxQueue : Number.POSITIVE_INFINITY,'),
     ], "import { captureBinding } from '../whale-policy.mjs';\n"),
     'channel-tools.js': ('9cbe8459bc21f28712b30c5d4dd23b388b44fc2d8c2a1fd15f7eb26906dfeab0', [
         # 收藏入口约束：sticker_tag 的 sticker 参数只允许"图库内已存在的图"。
@@ -55,7 +57,7 @@ for name, (digest, replacements, prefix) in specs.items():
         text = text.replace(old, new)
     patched = ('// QQ Whale policy v1\n' + prefix + text).encode()
     # previous 允许从旧补丁产物平滑升级：v1.1 = 首次部署产物；v1.2 = 加 safeTagSource 前的线上版本
-    previous = {'channel-tools.js': '26e80118b64dd59ea4125301f15d180965064cf0b27751fc8eacd904f4c2111c', 'gateway/middleware-setup.js': '13ae55962c812c1e530ace41d9f13ae708583da647c55b564af98fe0473c6b2a'}
+    previous = {'channel-tools.js': '26e80118b64dd59ea4125301f15d180965064cf0b27751fc8eacd904f4c2111c', 'gateway/middleware-setup.js': 'f36fe86160dd419e6c43012a1dd555076a56fa7858f870f7cbec449e8f5f3d54'}
     if raw not in (original, patched) and hashlib.sha256(raw).hexdigest() != previous.get(name):
         sys.exit(f'Local changes conflict: {name}; no files modified')
     planned.append((path, backup, original, patched))
@@ -71,4 +73,4 @@ for path, backup, original, patched in planned:
         shutil.copy2(path, backup)
     path.write_bytes(patched)
 (root / 'dist' / 'whale-policy.mjs').write_bytes(policy)
-print('QQ Whale policy v1 applied and verified (3 pinned modules)')
+print('QQ Whale policy v1 applied and verified (4 pinned modules)')

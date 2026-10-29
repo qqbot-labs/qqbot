@@ -35,11 +35,11 @@ const DEFAULT_CONFIG = {
   archiveEnabled: true,
   recallEnabled: true,
   recallMax: 3,
-  recallCooldownSec: 120,
+  recallCooldownSec: 0,
   minQueryChars: 4,
-  maxTextChars: 4000,
+  maxTextChars: 0,
   excludeRecent: 8,
-  minGapMs: 10 * 60 * 1000,
+  minGapMs: 0,
 };
 
 let core = null;
@@ -119,10 +119,10 @@ function readText(ctx, m) {
         if (ct.startsWith('video')) return '视频';
         return '附件';
       })
-      .slice(0, 4);
+;
     text = `${text}${text ? ' ' : ''}[${kinds.join('/')}]`.trim();
   }
-  if (text.length > cfg.maxTextChars) text = text.slice(0, cfg.maxTextChars);
+  if (cfg.maxTextChars > 0 && text.length > cfg.maxTextChars) text = text.slice(0, cfg.maxTextChars);
   return text;
 }
 
@@ -130,15 +130,13 @@ const PREFS_PATH = join(WHALE_ROOT, 'data', 'qqwhale', 'persona-preferences.json
 const PREFS_CORE = join(WHALE_ROOT, 'bin', 'persona-prefs-core.mjs');
 const PROACTIVE_PATH = join(WHALE_ROOT, 'etc', 'proactive.json');
 
-/** 读取长期人格偏好：只注入有效文本，最多取最近 30 条。 */
+/** 读取长期人格偏好：注入全部有效偏好，不按条数或字数静默丢弃。 */
 function readPersonaPrefs() {
   try {
     const parsed = JSON.parse(readFileSync(PREFS_PATH, 'utf8'));
     return (Array.isArray(parsed?.items) ? parsed.items : [])
       .filter((x) => x && typeof x.text === 'string' && x.text.trim())
-      .map((x) => ({ ...x, text: x.text.replace(/\s+/g, ' ').trim() }))
-      .filter((x) => x.text.length <= 300)
-      .slice(-30);
+      .map((x) => ({ ...x, text: x.text.replace(/\s+/g, ' ').trim() }));
   } catch {
     return [];
   }
@@ -152,11 +150,11 @@ function ownerPeer() {
   } catch { return ''; }
 }
 
-/** 只自动捕获明确的长期要求；带问号/疑问语气或过长的消息不猜。 */
+/** 只自动捕获明确的长期要求；带问号/疑问语气的消息不猜。 */
 function isDurableInstruction(text) {
   const t = String(text ?? '').trim();
-  if (!t || t.length > 300 || /[吗么？?]\s*$/.test(t)) return false;
-  return /(记住|记一下|记好|以后都|以后不|今后|每次|必须|不许|不要再用|别再用|叫我|称呼我|我的名字是|我(?:喜欢|讨厌|习惯))/.test(t);
+  if (!t || /[吗么？?]\s*$/.test(t)) return false;
+  return /(记住|记一下|记好|以后都|以后不|今后|每次|必须|不许|不要再用|别再用|叫我|称呼我|我的名字是|设定是|设定为|人设是|当成|我们以后|我是.{0,10}(?:老师|学生|程序员)|我(?:喜欢|讨厌|习惯))/.test(t);
 }
 
 export async function onInbound(ctx, next) {
@@ -187,18 +185,9 @@ export async function onInbound(ctx, next) {
   const incoming = String(ctx.text ?? '').trim();
   const owner = ownerPeer();
   const isOwner = meta.scope === 'c2c' && owner !== '' && meta.peer === owner;
-  let autoSaved = false;
-  // 明确的长期要求先落盘，保证"聊天里说过的要求"不会只停留在当前上下文。
-  if (isOwner && isDurableInstruction(incoming)) {
-    try {
-      const prefsCore = await import(PREFS_CORE);
-      await prefsCore.add(PREFS_PATH, incoming, 'chat-auto');
-      autoSaved = true;
-    } catch {
-      failures.recall += 1;
-    }
-  }
-
+  // 原文已经独立归档。只提醒按主题持久化，避免把一整条复合消息再次
+  // 作为活跃偏好注入，导致更正后旧称呼/旧设定仍与新值并存。
+  const needsDurableSave = isOwner && isDurableInstruction(incoming);
   const parts = [];
   let recalled = false;
   // ── 自动召回 ──────────────────────────────────────────────────────────────
@@ -237,23 +226,25 @@ export async function onInbound(ctx, next) {
   let prefsRev = '';
   try { prefsRev = createHash('sha256').update(readFileSync(PREFS_PATH)).digest('hex'); } catch { prefsRev = ''; }
   const injected = prefsInjected.get(meta.peer);
-  const refresh = !injected || injected.rev !== prefsRev || autoSaved || (injected.count || 0) + 1 >= PREFS_REFRESH_EVERY;
+  const refresh = !injected || injected.rev !== prefsRev || needsDurableSave || (injected.count || 0) + 1 >= PREFS_REFRESH_EVERY;
   prefsInjected.set(meta.peer, { rev: prefsRev, count: refresh ? 0 : (injected?.count || 0) + 1 });
-  if (prefs.length && refresh) {
+  let revoked = [];
+  if (isOwner) { try { revoked = JSON.parse(readFileSync(PREFS_PATH,'utf8')).revoked || []; } catch {} }
+  if ((prefs.length || revoked.length) && refresh) {
     const lines = [];
     let used = 0;
     for (const item of prefs.slice().reverse()) {
-      const line = `- ${item.text}`;
-      if (used + line.length > 2800) break;
+      const line = `- [${item.id}] [${item.kind||'preference'}${item.key?' · '+item.key:''}] ${item.text}`;
       lines.unshift(line);
       used += line.length + 1;
     }
+    if (revoked.length) lines.push('已撤销的主题（不要从旧聊天恢复，除非用户重新明确设定）：'+revoked.map(x=>x.key).join('、'));
     if (lines.length) {
-      parts.push(`【长期人格偏好｜用户明确要求，必须遵守】\n${lines.join('\n')}`);
+      parts.push(`【长期熟悉档案｜用户原意，最新更正优先；setting是共同设定，不等同现实fact】\n${lines.join('\n')}`);
     }
   }
-  if (autoSaved) {
-    parts.push('【本轮已记录】用户这条消息包含长期要求，已经写入长期人格偏好。回复时自然遵守，不要复述这条系统提示。');
+  if (needsDurableSave) {
+    parts.push('【本轮需要保存长期信息】用户原话已独立归档。请在结束本轮回复前，使用 persona_remember 按主题保存稳定信息或更正已有key；撤销旧设定用persona_forget。不要把整条复合消息另存成一条含多个主题的重复偏好。自然回应，不复述本提示。');
   }
   if (parts.length > 0 && ctx.silentInto) {
     const ok = ctx.silentInto(parts.join('\n\n'));

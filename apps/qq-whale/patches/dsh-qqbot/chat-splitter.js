@@ -1,20 +1,32 @@
 /**
- * 聊天消息语义分段器（QQ Whale 本地增强 v3）
+ * 聊天消息语义分段器（QQ Whale 本地增强 v4）
  *
  * 目标：把“较长、包含多个完整句子/自然段/明显停顿”的普通聊天回复拆成
- * 2~5 条独立 QQ 消息；短回复、代码块、表格、列表、引用、标题保持一条。
+ * 若干条独立 QQ 消息；短回复、代码块、表格、列表、引用、标题保持一条。
  *
  * - 优先保留模型用空行分出的短消息，不再合回长段落；
- * - 自动分条只在完整句子/换行处分，不把逗号连接的长句从中间拆开；
+ * - 自动分条优先完整句子/换行，超长逗号串可在语义转折处分开；
  * - 分段基于原文索引切片，保留内容、标点和顺序；
  * - 链接、行内代码、括号、中文引号和 @ 标签内部不切。
  */
 
-const SHORT_LIMIT = 40; // 一句说清的短回复保持一条
-const TARGET_CHARS = 28; // 自动分条的目标长度；完整句子可以超出
-const MAX_MESSAGES = 4;
-const MAX_MESSAGES_VERY_LONG = 5; // QQ 被动回复额度内兜底，不截掉剩余正文
-const MIN_MESSAGE_CHARS = 8;
+export const DEFAULT_CHAT_CONFIG = Object.freeze({
+  shortLimit: 36,
+  targetChars: 28,
+  longSentenceChars: 64,
+  minMessageChars: 8,
+  maxMessages: 0, // 0 = 不设本地条数上限；平台额度由发送 API 决定
+  messageDelayMs: 650,
+  typingMsPerChar: 8,
+});
+
+export function chatConfig(raw = {}) {
+  return Object.fromEntries(Object.entries(DEFAULT_CHAT_CONFIG).map(([key, fallback]) => {
+    const value = raw[key];
+    return [key, typeof value === 'number' && Number.isFinite(value) && value >= 0
+      && (key !== 'maxMessages' || Number.isInteger(value)) ? value : fallback];
+  }));
+}
 
 const STRUCTURED = [
   /```/,
@@ -33,46 +45,45 @@ const CLOSERS = new Set(['”', '’', '」', '』', '）', ')', '】', '》', '
  * @param {string} input 原始回复文本
  * @returns {string[]} 按顺序排列的消息文本；无需拆分时返回单元素数组
  */
-export function splitChatMessages(input) {
+export function splitChatMessages(input, options = {}) {
+  const cfg = chatConfig(options);
   const text = stripAssistantMeta(String(input ?? '').replace(/\r\n?/g, '\n').trim());
   if (!text) return [];
-  // 结构化内容保持原样，由原有 4500 字上限切分器兜底。
   if (STRUCTURED.some((re) => re.test(text))) return [text];
-
-  const units = tokenize(text);
+  const units = tokenize(text, cfg);
   if (units.length < 2) return [text];
 
-  const total = text.length;
-  const cap = total >= 300 ? MAX_MESSAGES_VERY_LONG : MAX_MESSAGES;
-  // 只认未受保护的空行：引号、括号或链接内的换行不会成为边界。
+  // 模型明确换行的意图优先；短至“好啊 / 等你”也不重新粘连。
   const paragraphs = [];
   for (const unit of units) {
     const previous = paragraphs.at(-1);
-    if (!previous || /\n[ \t]*\n/.test(text.slice(previous.at(-1).end, unit.start))) {
-      paragraphs.push([unit]);
-    } else previous.push(unit);
+    if (!previous || /\n/.test(text.slice(previous.at(-1).end, unit.start))) paragraphs.push([unit]);
+    else previous.push(unit);
   }
-  if (paragraphs.length >= 2 && paragraphs.length <= cap
-      && paragraphs.every((group) => group.at(-1).end - group[0].start <= SHORT_LIMIT)) {
-    return paragraphs.map((group) => text.slice(group[0].start, group.at(-1).end));
+  if (paragraphs.length === 1 && text.length < cfg.shortLimit) return [text];
+  let groups = [];
+  for (const paragraph of paragraphs) {
+    let current = [];
+    let length = 0;
+    const packed = [];
+    for (const unit of paragraph) {
+      if (current.length && length + unit.text.length > cfg.targetChars
+          && length >= cfg.minMessageChars) {
+        packed.push(current);
+        current = [];
+        length = 0;
+      }
+      current.push(unit);
+      length += unit.text.length;
+    }
+    if (current.length) packed.push(current);
+    groups.push(...mergeShort(packed, cfg.minMessageChars));
   }
-  if (total < SHORT_LIMIT) return [text];
-
-  const wanted = Math.min(
-    cap,
-    Math.max(2, Math.round(total / TARGET_CHARS)),
-    units.length,
-  );
-  let groups = partition(units, wanted);
-  groups = mergeShort(groups, MIN_MESSAGE_CHARS);
-  if (groups.length < 2) return [text];
-
-  const parts = groups
-    .map((group) => text.slice(group[0].start, group[group.length - 1].end).trim())
-    .filter(Boolean);
-  return parts.length >= 2 ? parts : [text];
+  if (cfg.maxMessages > 0 && groups.length > cfg.maxMessages) {
+    groups = greedyPartition(groups.flat(), cfg.maxMessages);
+  }
+  return groups.map((group) => text.slice(group[0].start, group.at(-1).end).trim()).filter(Boolean);
 }
-
 
 /**
  * 去掉模型偶发夹带在正文前面的“元思考/计划”段落。
@@ -142,7 +153,7 @@ function looksLikeMeta(paragraph) {
  * 按完整句子和换行切分；跳过链接、行内代码、Markdown 链接、括号、
  * 中文引号和 <...> 标签内部。
  */
-function tokenize(text) {
+function tokenize(text, cfg) {
   const units = [];
   let start = 0;
   let i = 0;
@@ -154,6 +165,14 @@ function tokenize(text) {
       continue;
     }
     const ch = text[i];
+    // 只为超过阈值的逗号串找语义转折；引号、链接、括号由上面的保护扫描跳过。
+    if ((ch === '，' || ch === ',') && cfg.longSentenceChars > 0
+        && i - start >= cfg.targetChars
+        && text.slice(start).split(/[。！？!?\n]/, 1)[0].length >= cfg.longSentenceChars
+        && /^(?:不过|但是|可是|然后|另外|还有|所以|至于|反正|其实|要不|你(?:可以|先|也|就)|我(?:也|先|再|就))/.test(text.slice(i + 1).trimStart())) {
+      pushUnit(units, text, start, i + 1);
+      start = i + 1;
+    }
     if (ch === '\n') {
       pushUnit(units, text, start, i);
       start = i + 1;
@@ -266,45 +285,6 @@ function greedyPartition(units, wanted) {
     }
   }
   if (current.length) groups.push(current);
-  return groups;
-}
-
-/**
- * 按目标条数把有序单元分成若干组，尽量让每组长度接近。
- * 动态规划最小化“最长一组”的长度，避免前几条很长、最后一条只剩半句话。
- */
-function partition(units, wanted) {
-  const count = units.length;
-  if (count > 500) return greedyPartition(units, wanted);
-
-  const prefix = [0];
-  for (const unit of units) prefix.push(prefix[prefix.length - 1] + unit.text.length);
-
-  const infinity = Number.POSITIVE_INFINITY;
-  const dp = Array.from({ length: wanted + 1 }, () => Array(count + 1).fill(infinity));
-  const cut = Array.from({ length: wanted + 1 }, () => Array(count + 1).fill(-1));
-  dp[0][0] = 0;
-
-  for (let group = 1; group <= wanted; group += 1) {
-    for (let end = group; end <= count; end += 1) {
-      for (let start = group - 1; start < end; start += 1) {
-        const candidate = Math.max(dp[group - 1][start], prefix[end] - prefix[start]);
-        if (candidate < dp[group][end]) {
-          dp[group][end] = candidate;
-          cut[group][end] = start;
-        }
-      }
-    }
-  }
-
-  const groups = [];
-  let end = count;
-  for (let group = wanted; group >= 1; group -= 1) {
-    const start = cut[group][end];
-    if (start < 0) return units.map((unit) => [unit]);
-    groups.unshift(units.slice(start, end));
-    end = start;
-  }
   return groups;
 }
 

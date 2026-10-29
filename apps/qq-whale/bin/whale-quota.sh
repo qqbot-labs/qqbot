@@ -24,7 +24,7 @@
 # 可覆盖的环境变量：
 #   WHALE_HOME=/home/qqwhale        WHALE_ROOT=$WHALE_HOME/whale
 #   WHALE_DATA_DIR=$WHALE_ROOT/data           被统计的数据根
-#   WHALE_DATA_MAX_MB=512                     数据根体积上限（MB）
+#   WHALE_DATA_MAX_MB=0                     数据根体积告警阈值（MB）；0 不设阈值
 #   WHALE_STICKER_MAX_AGE_DAYS=30             待整理区可清理的年龄阈值（天）
 #   WHALE_STICKER_PENDING_DIR=<绝对路径>      显式指定"待整理区"目录（覆盖自动探测）
 # =============================================================================
@@ -58,7 +58,7 @@ WHALE_HOME="${WHALE_HOME:-/home/${WHALE_USER}}"
 WHALE_ROOT="${WHALE_ROOT:-${WHALE_HOME}/whale}"
 DSH_HOME="${DSH_HOME:-${WHALE_HOME}/.dsh}"
 DATA_DIR="${WHALE_DATA_DIR:-${WHALE_ROOT}/data}"
-MAX_MB="${WHALE_DATA_MAX_MB:-512}"
+MAX_MB="${WHALE_DATA_MAX_MB:-0}"
 MAX_AGE_DAYS="${WHALE_STICKER_MAX_AGE_DAYS:-30}"
 PENDING_OVERRIDE="${WHALE_STICKER_PENDING_DIR:-}"
 
@@ -87,7 +87,7 @@ whale-quota.sh —— 小鲸鱼磁盘配额守护
 
 环境变量:
   WHALE_DATA_DIR=$WHALE_ROOT/data               被统计的数据根
-  WHALE_DATA_MAX_MB=512                         体积上限（MB）
+  WHALE_DATA_MAX_MB=0                         体积上限（MB）
   WHALE_STICKER_MAX_AGE_DAYS=30                 可清理年龄阈值（天）
   WHALE_STICKER_PENDING_DIR=<绝对路径>          显式指定"待整理区"目录
 
@@ -240,7 +240,7 @@ main() {
   max_kb=$((MAX_MB * 1024))
   used_pct=0
   if [ "$max_kb" -gt 0 ]; then used_pct=$((used_kb * 100 / max_kb)); fi
-  if [ "$used_kb" -gt "$max_kb" ]; then status="over"; else status="ok"; fi
+  if [ "$max_kb" -eq 0 ]; then status="unlimited"; elif [ "$used_kb" -gt "$max_kb" ]; then status="over"; else status="ok"; fi
 
   # --- 明细（人类可读）---
   info "数据目录：$DATA_DIR"
@@ -313,7 +313,7 @@ main() {
       files=$(find "$DATA_DIR" -type f 2>"$NULL_DEV" | wc -l | tr -d ' ') || files=0
       used_pct=0
       if [ "$max_kb" -gt 0 ]; then used_pct=$((used_kb * 100 / max_kb)); fi
-      if [ "$used_kb" -gt "$max_kb" ]; then status="over"; else status="ok"; fi
+      if [ "$max_kb" -eq 0 ]; then status="unlimited"; elif [ "$used_kb" -gt "$max_kb" ]; then status="over"; else status="ok"; fi
       if [ "$failed" -gt 0 ]; then
         printf '[qqwhale-quota] data=%s limit=%sMB used=%s%% files=%s candidates=%s oldest=%s status=%s failed=%s\n' \
           "$(_human_kb "$used_kb")" "$MAX_MB" "$((used_kb * 100 / (max_kb > 0 ? max_kb : 1)))" "$files" "$cand_count" \

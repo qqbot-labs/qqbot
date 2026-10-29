@@ -12,12 +12,12 @@ export function validate(name,args){
  const allowed=name==='web_search'?['query','max_results']:name==='web_fetch'?['url','max_chars']:[];
  if(!allowed.length||Object.keys(args).some(k=>!allowed.includes(k)))throw Error('包含不支持的参数');
  if(name==='web_search'){
-  if(typeof args.query!=='string'||!args.query.trim()||args.query.length>500)throw Error('搜索内容应为1–500字符');
-  const count=args.max_results??5;if(!Number.isInteger(count)||count<1||count>10)throw Error('max_results应为1–10整数');
+  if(typeof args.query!=='string'||!args.query.trim())throw Error('搜索内容不能为空');
+  const count=args.max_results??5;if(!Number.isInteger(count)||count<1)throw Error('max_results应为正整数');
   return {query:args.query.trim(),max_results:count};
  }
- if(typeof args.url!=='string'||args.url.length>2048)throw Error('网页地址无效');
- const count=args.max_chars??16000;if(!Number.isInteger(count)||count<500||count>20000)throw Error('max_chars应为500–20000整数');
+ if(typeof args.url!=='string')throw Error('网页地址无效');
+ const count=args.max_chars??16000;if(!Number.isInteger(count)||count<1)throw Error('max_chars应为正整数');
  const url=publicURL(args.url);return {url:url.href,max_chars:count};
 }
 export function publicIP(raw){
@@ -43,7 +43,7 @@ function record(value){try{const folder=join(ROOT,'data/qqwhale');mkdirSync(fold
 async function boundedJSON(response){
  if(!response.ok)throw Error('联网接口HTTP '+response.status);
  const reader=response.body.getReader();let bytes=0;const chunks=[];
- try{while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.length;if(bytes>1024*1024){await reader.cancel();throw Error('联网结果超过大小限制')}chunks.push(Buffer.from(value))}}finally{reader.releaseLock()}
+ try{while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.length;const maxBytes=configuration().maxResponseBytes||0;if(maxBytes>0&&bytes>maxBytes){await reader.cancel();throw Error('联网结果超过大小限制')}chunks.push(Buffer.from(value))}}finally{reader.releaseLock()}
  let result;try{result=JSON.parse(Buffer.concat(chunks).toString('utf8'))}catch{throw Error('联网接口返回无效JSON')}
  if(!result||typeof result!=='object'||result.error)throw Error('联网接口返回错误');return result;
 }

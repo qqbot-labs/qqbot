@@ -182,7 +182,7 @@ export function archiveMessage(db, rec) {
 export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent = 0 }) {
   const text = String(q ?? '').trim();
   if (!text) return [];
-  const lim = Math.max(1, Math.min(20, Number(limit) || 5));
+  const lim = Number.isSafeInteger(limit) && limit >= 0 ? (limit || -1) : 5;
   const cutoff = beforeTs ?? Number.MAX_SAFE_INTEGER;
   const params = [text, cutoff];
   let sql;
@@ -199,7 +199,7 @@ export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent
       params.push(peer);
     }
     sql += ' ORDER BY bm25(msg_fts), m.ts DESC LIMIT ?';
-    params.push(lim + excludeRecent);
+    params.push(lim < 0 ? -1 : lim + excludeRecent);
   } else {
     sql = `SELECT id, ts, scope, sender_name, text
              FROM msg
@@ -210,7 +210,7 @@ export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent
       params.push(peer);
     }
     sql += ' ORDER BY ts DESC LIMIT ?';
-    params.push(lim + excludeRecent);
+    params.push(lim < 0 ? -1 : lim + excludeRecent);
   }
 
   let rows = [];
@@ -238,7 +238,7 @@ export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent
         p2.push(peer);
       }
       sql2 += ' ORDER BY ts DESC LIMIT ?';
-      p2.push(lim + excludeRecent);
+      p2.push(lim < 0 ? -1 : lim + excludeRecent);
       try {
         rows = db.prepare(sql2).all(...p2);
       } catch {
@@ -247,13 +247,13 @@ export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent
     }
   }
 
-  if (excludeRecent > 0) rows = rows.slice(0, lim);
+  if (excludeRecent > 0 && lim > 0) rows = rows.slice(0, lim);
   return rows;
 }
 
 /** 最近消息（按时间倒序）。 */
 export function recentMessages(db, { peer, limit = 10 }) {
-  const lim = Math.max(1, Math.min(50, Number(limit) || 10));
+  const lim = Number.isSafeInteger(limit) && limit >= 0 ? (limit || -1) : 10;
   const params = [];
   let sql = `SELECT id, ts, scope, sender_name, text FROM msg WHERE deleted = 0`;
   if (peer) {
@@ -286,7 +286,7 @@ export function addMemory(db, rec) {
 export function searchMemories(db, { q, limit = 5 }) {
   const text = String(q ?? '').trim();
   if (!text) return [];
-  const lim = Math.max(1, Math.min(20, Number(limit) || 5));
+  const lim = Number.isSafeInteger(limit) && limit >= 0 ? (limit || -1) : 5;
   try {
     const ftsQuery = buildFtsQuery(text);
     if (ftsQuery) {

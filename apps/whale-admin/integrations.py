@@ -38,7 +38,7 @@ def register_models():
         if m['id'] in known:continue
         try:ctx=int(m.get('context_length') or 131072);output=int(m.get('max_output_tokens') or 8192)
         except (ValueError,TypeError):continue
-        p['models'].append({'id':m['id'],'name':m.get('routing_name') or m.get('name') or m['id'],'contextWindow':min(ctx,131072),'maxTokens':min(output,8192),'input':['text'],'reasoningEfforts':{'off':None,'low':'low','high':'high','max':'max'}});added.append(m['id'])
+        p['models'].append({'id':m['id'],'name':m.get('routing_name') or m.get('name') or m['id'],'contextWindow':ctx,'maxTokens':output,'input':['text'],'reasoningEfforts':{'off':None,'low':'low','high':'high','max':'max'}});added.append(m['id'])
     if added:
         backup=d.snapshot('同步网关模型目录');old=d.conf(rows,'persona')['prefix'].encode();text=d.yaml.dump(rows,Dumper=d.Dumper,allow_unicode=True,sort_keys=False,width=100000)
         if d.conf(d.yaml.load(text,Loader=d.Loader),'persona')['prefix'].encode()!=old:raise d.Error('人格字节校验失败')
@@ -66,7 +66,7 @@ def calls(args):
     return data
 
 def routing_get():
-    policy=json.loads(ROUTING.read_text()) if ROUTING.exists() else {'enabled':False,'models':[],'cooldownSec':300}
+    policy=json.loads(ROUTING.read_text()) if ROUTING.exists() else {'enabled':False,'models':[],'cooldownSec':0}
     p=d.ROOT/'data/qqwhale/routing-events.jsonl';events=[]
     if p.exists():
         for line in p.read_text()[-40000:].splitlines()[-50:]:
@@ -76,11 +76,11 @@ def routing_get():
 
 def routing_save(body):
     if set(body)-{'enabled','models','cooldownSec'}:raise d.Error('路由规则包含未知字段')
-    if type(body.get('enabled'))!=bool or not isinstance(body.get('models'),list) or len(body['models'])>8 or len(set(body['models']))!=len(body['models']):raise d.Error('路由配置格式无效')
+    if type(body.get('enabled'))!=bool or not isinstance(body.get('models'),list) or len(set(body['models']))!=len(body['models']):raise d.Error('路由配置格式无效')
     available={m['id'] for m in d.conf(d.load_profile(),'llm-pi-ai')['providers']['whale-gateway']['models']}
     if not all(isinstance(m,str) and m in available for m in body['models']):raise d.Error('路由候选必须先同步到本地模型目录')
     if body['enabled'] and len(body['models'])<2:raise d.Error('自动切换至少需要两个不同的模型或分组')
-    if type(body.get('cooldownSec'))!=int or not 30<=body['cooldownSec']<=3600:raise d.Error('冷却时间应为 30–3600 秒')
+    if type(body.get('cooldownSec'))!=int or body['cooldownSec']<0:raise d.Error('冷却时间应为非负秒数，0 表示关闭')
     # Separate root-owned policy under the bot's read-only etc mount.
     if ROUTING.exists():
         folder=d.STATE/'routing-revisions';folder.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -154,8 +154,8 @@ def vision_save(body):
     if body.get('revision')!=d.digest(VISION.read_bytes()):raise d.Error('视觉配置已更改，请刷新后保存')
     models={m['id'] for m in vision_models()}
     if type(body.get('enabled'))!=bool or body.get('model') not in models or body.get('fallbackModel') not in models:raise d.Error('请选择网关公告支持图片的视觉模型')
-    for name,lo,hi in [('gifFrames',2,8),('maxImages',1,3),('timeoutMs',10000,45000)]:
-        if type(body.get(name))!=int or not lo<=body[name]<=hi:raise d.Error('视觉参数超出范围：'+name)
+    for name,lo,hi in [('gifFrames',1,None),('maxImages',0,None),('timeoutMs',1,None)]:
+        if type(body.get(name))!=int or body[name]<lo:raise d.Error('视觉参数超出范围：'+name)
     folder=d.STATE/'vision-revisions';folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     d.shutil.copyfile(VISION,folder/(d.stamp()+'.json'))
     policy={k:v for k,v in body.items() if k!='revision'}

@@ -2,6 +2,7 @@
 
 这里保留可公开的结构和示例，不包含线上人格、真实账号或凭据：
 
+- `chat-delivery.example.json`：分条目标、长句兜底、可关闭的条数上限与发送停顿。
 - `proactive.example.json`：主动关心节奏、免打扰、目标占位符和文案示例。
 - `vision-routing.json`：图片识别模型、回退模型和超时。
 - `search-config.json` / `admin-routing.json`：联网搜索和管理员路由配置。
@@ -16,3 +17,5 @@
 - `qqwhale.service` 中的只读/可写路径白名单。
 
 不要把 `qqbot.env`、`qzone-token`、`admin-password.txt` 或运行数据库复制进仓库。
+
+主动闲置/发送/评估间隔设为 0 不拦截；免打扰起止相同即关闭。表情包总闸门关闭时不执行单轮或每日限额。`search-config.json` 的 `maxResponseBytes=0` 不设置本地响应大小上限。

@@ -9,6 +9,8 @@
 
 默认正式分支：`main`。`main` 要求通过 Pull Request、至少一位其他协作者审核和 Code Owner 审核后合并；禁止强推和删除正式分支。
 
+当前产品定义见 [PRD](docs/PRD.md)。聊天节奏、长期熟悉档案和可关闭配额以该文档为准。
+
 ## 安全边界
 
 仓库只保存可审查的源码、示例配置和部署模板。以下内容不进入 Git：
@@ -33,7 +35,7 @@ QQ Whale / 管理台：
 
 ```bash
 cd apps/qq-whale
-node --test tests/chat-splitter.test.mjs tests/send-outbound.test.mjs
+node --test tests/*.test.mjs
 
 cd ../whale-admin
 python3 -m py_compile server.py domain.py integrations.py proactive.py workspace.py
