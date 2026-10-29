@@ -1,0 +1,54 @@
+# =============================================================================
+# qqwhale-monitor.service —— 小鲸鱼四层健康检查（由 qqwhale-monitor.timer 触发）
+# =============================================================================
+# 只读：不重启任何东西、不修改任何文件，仅把结论写进日志并给出退出码。
+# 检查四件互相独立的事：进程存活 / Web 端口可连 / QQ 网关连接 / 模型 API 调用。
+# 退出码：0=正常，1=有告警，2=有致命问题（供后续接告警用）。
+# =============================================================================
+[Unit]
+Description=QQ 小鲸鱼健康检查（四层：进程/端口/网关/模型）
+After=qqwhale.service
+
+[Service]
+Type=oneshot
+User=qqwhale
+Group=qqwhale
+# 只读检查：不需要任何写权限，因此沙箱可以比主服务更严
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+ReadWritePaths=
+ReadOnlyPaths=/home/qqwhale/whale
+StandardInput=data
+StandardInputData=AA==
+
+# /dev/null 修复（完全限定在项目内，不改宿主机任何配置）
+# 本机 /dev/null 被改成 crw------- root，非 root 打不开；而 systemd 的私有 /dev
+# 是从宿主 bind 标准设备节点，所以沙箱内权限照旧 —— 任何 `>/dev/null` 都会失败
+# （实测：监控脚本因此报错、逻辑中断；DSH 自身暂未受影响但存在同样风险）。
+# 做法：在项目目录里放一个权限正确的 null 节点，用 BindPaths 覆盖服务内的 /dev/null。
+# 已实测：沙箱内变成 crw-rw-rw- 且可写。宿主机 /dev/null 保持原样、不受影响。
+BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
+
+Environment=HOME=/home/qqwhale
+Environment=DSH_HOME=/home/qqwhale/.dsh
+Environment=WHALE_ROOT=/home/qqwhale/whale
+Environment=WHALE_WEB_PORT=3080
+ExecStart=/home/qqwhale/whale/bin/whale-monitor.sh
+
+[Install]
+WantedBy=multi-user.target

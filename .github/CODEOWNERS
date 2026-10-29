@@ -1,0 +1,9 @@
+# 所有变更都需要另一位协作者审查
+* @xiaodianshiuwu
+
+# 各运行栈的审查范围保持一致
+/apps/qq-agent/ @xiaodianshiuwu
+/apps/qq-whale/ @xiaodianshiuwu
+/apps/whale-admin/ @xiaodianshiuwu
+/deploy/ @xiaodianshiuwu
+/docs/ @xiaodianshiuwu

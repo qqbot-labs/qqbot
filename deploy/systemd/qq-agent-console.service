@@ -1,0 +1,25 @@
+[Unit]
+Description=QQ Agent private administration console
+After=network.target
+[Service]
+Type=simple
+User=qqagent
+Group=qqagent
+WorkingDirectory=/opt/qq-agent
+Environment=QQAGENT_DATA=/var/lib/qq-agent
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/qq-agent/.venv/bin/python -m qqagent --data /var/lib/qq-agent --port 13800
+Restart=on-failure
+RestartSec=5
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qq-agent
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=512M
+# NoNewPrivileges deliberately omitted: exact systemctl verbs are allowed by sudoers.
+[Install]
+WantedBy=multi-user.target

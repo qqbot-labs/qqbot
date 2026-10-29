@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+# =============================================================================
+# whale-ctl —— QQ 小鲸鱼统一管理入口
+# =============================================================================
+# 所有日常运维动作都从这里走，避免记一堆零散命令。
+#
+# 设计约束：
+#   · 只操作 qqwhale 用户自己的服务与 /home/qqwhale 下的数据
+#   · 任何修改 profile 配置的动作都会先备份
+#   · 不做任何影响其他服务的操作
+#
+# 用法: whale-ctl <子命令> [参数...]      （whale-ctl help 查看全部）
+# =============================================================================
+set -euo pipefail
+
+# ── 沙箱安全重定向（QQ 小鲸鱼项目专用）─────────────────────────────────────
+# 本机 /dev/null 被改成 crw------- root（宿主机既有异常），非 root 进程打不开，
+# 任何 `>"$NULL_DEV"` 都会让命令整体失败（实测把 command -v 判成"命令不存在"）。
+# 这里在脚本启动时探测一次：打不开就把 NULL_DEV 指到项目内的 private-null 节点
+# （由 deploy/install.sh 以 mknod 创建，权限 666）。后续统一用 $NULL_DEV。
+# 该变量只影响本脚本内部的重定向目标，不改宿主机任何配置。
+NULL_DEV=/dev/null
+# 探测规则（务必保持）：判断"能否写 /dev/null"时，stderr 只能丢弃到
+# 一个**当前已知可写**的地方。第一次探测时唯一可靠的丢弃点是 fd1/合并没有意义 ——
+# 所以用 `2>&-`（关闭 stderr）而不是 2>/dev/null：后者本身就是要验证的设备，
+# 设备坏了探测就永远失败（真机踩过：tar 因此被误判不存在）。
+# mknod 出来的 private-null（c 1 3，666）作为回退目标，由 install.sh 创建。
+if ! ( : > /dev/null ) 2>&- ; then
+    for _cand in "${WHALE_ROOT:-/home/qqwhale/whale}/etc/private-null" /home/qqwhale/whale/etc/private-null; do
+        if [ -c "$_cand" ] && ( : > "$_cand" ) 2>&-; then NULL_DEV="$_cand"; break; fi
+    done
+fi
+# 把脚本内后续出现的字面 /dev/null 重定向统一替换为 $NULL_DEV（见下方 sed 预处理）。
+
+
+WHALE_USER="${WHALE_USER:-qqwhale}"
+WHALE_HOME="${WHALE_HOME:-/home/${WHALE_USER}}"
+WHALE_ROOT="${WHALE_ROOT:-${WHALE_HOME}/whale}"
+DSH_HOME="${DSH_HOME:-${WHALE_HOME}/.dsh}"
+PROFILE_DIR="${DSH_HOME}/profiles/web"
+PATCH="${PROFILE_DIR}/cordis.patch.yml"
+SERVICE="qqwhale.service"
+DSH_BIN="${WHALE_ROOT}/app/node_modules/.bin/dsh"
+DATA_ROOT="${WHALE_ROOT}/data"
+
+# 若当前用户就是 qqwhale，直接执行；否则通过 runuser/sudo 切换
+run_as_whale() {
+  if [ "$(id -un)" = "$WHALE_USER" ]; then
+    env HOME="$WHALE_HOME" DSH_HOME="$DSH_HOME" "$@"
+  elif command -v runuser >"$NULL_DEV" 2>&1; then
+    runuser -u "$WHALE_USER" -- env HOME="$WHALE_HOME" DSH_HOME="$DSH_HOME" "$@"
+  else
+    sudo -u "$WHALE_USER" env HOME="$WHALE_HOME" DSH_HOME="$DSH_HOME" "$@"
+  fi
+}
+
+# system 级单元（User=qqwhale），因此用系统 systemctl 而非 --user。
+# 原因见 systemd/qqwhale.service 头部注释：本机 /dev/null 异常 + AppArmor 限制
+# 非特权 userns，用户级服务既起不来、沙箱也不生效。
+sysctl_user() {
+  systemctl "$@"
+}
+
+web_port() {
+  # 从单元文件里读实际端口，避免和配置漂移
+  local f="/etc/systemd/system/${SERVICE}"
+  if [ -f "$f" ]; then
+    grep -oE '\-\-port[= ][0-9]+' "$f" | grep -oE '[0-9]+' | head -1
+  fi
+}
+
+# 读取 patch 里某个键的当前值（只处理顶层缩进固定的标量，够用且安全）
+patch_get() {
+  local key="$1"
+  [ -f "$PATCH" ] || { echo ""; return; }
+  grep -E "^[[:space:]]*${key}:[[:space:]]*" "$PATCH" | head -1 | sed -E "s/^[[:space:]]*${key}:[[:space:]]*//" | sed -E 's/[[:space:]]*#.*$//'
+}
+
+# 修改 patch 里的标量键：先备份，再原地替换；找不到键就报错（不静默新建）
+patch_set() {
+  local key="$1" val="$2"
+  [ -f "$PATCH" ] || { echo "[错误] 配置文件不存在: $PATCH" >&2; return 1; }
+
+  local bak
+
+  bak="${PATCH}.bak-$(date +%Y%m%d-%H%M%S)"
+  cp -p "$PATCH" "$bak" || { echo "[错误] 备份失败，中止修改" >&2; return 1; }
+
+  if ! grep -qE "^[[:space:]]*${key}:[[:space:]]*" "$PATCH"; then
+    echo "[错误] 配置里找不到键 '${key}'，拒绝自动新增（避免写坏配置）。" >&2
+    echo "        原文件已备份在: $bak" >&2
+    return 1
+  fi
+
+  # 用 python 做替换，避免 sed 对特殊字符的转义问题
+  python3 - "$PATCH" "$key" "$val" <<'PY'
+import re, sys, pathlib
+path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+p = pathlib.Path(path)
+text = p.read_text(encoding='utf-8')
+pat = re.compile(r'^([ \t]*)' + re.escape(key) + r':[ \t]*[^\n#]*(#[^\n]*)?$', re.M)
+new, n = pat.subn(lambda m: f"{m.group(1)}{key}: {val}", text, count=1)
+if n == 0:
+    sys.exit(f"未匹配到键 {key}")
+p.write_text(new, encoding='utf-8')
+print(f"已设置 {key} = {val}")
+PY
+}
+
+require_root_or_self() {
+  if [ "$(id -un)" != "$WHALE_USER" ] && [ "$(id -u)" -ne 0 ] && ! command -v sudo >"$NULL_DEV" 2>&1; then
+    echo "[错误] 需要 root 或 sudo 才能以 ${WHALE_USER} 身份操作" >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+cmd_status() {
+  echo "=== 小鲸鱼运行状态 ==="
+  printf '%-14s %s\n' "服务:" "$(systemctl is-active "$SERVICE" 2>"$NULL_DEV" || echo unknown)"
+  printf '%-14s %s\n' "开机自启:" "$(systemctl is-enabled "$SERVICE" 2>"$NULL_DEV" || echo unknown)"
+
+  local port; port=$(web_port)
+  if [ -n "$port" ]; then
+    printf '%-14s %s\n' "Web 端口:" "$port"
+    if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>"$NULL_DEV"; then
+      echo "               127.0.0.1:${port} 可连接 ✓"
+      exec 3<&- 2>"$NULL_DEV" || true
+    else
+      echo "               127.0.0.1:${port} 连接失败 ✗"
+    fi
+    # 监听地址必须只有 loopback
+    if command -v ss >"$NULL_DEV" 2>&1; then
+      local binds
+      binds=$(ss -tlnH 2>"$NULL_DEV" | awk '{print $4}' | grep -E "[:.]${port}\$" | tr '\n' ' ')
+      printf '%-14s %s\n' "监听地址:" "${binds:-（无）}"
+      case "$binds" in
+        *0.0.0.0*|*'::'*) echo "               ⚠️ 检测到非 loopback 绑定，存在暴露风险！" ;;
+      esac
+    fi
+  fi
+
+  local pid
+  pid=$(systemctl show "$SERVICE" -p MainPID --value 2>"$NULL_DEV" || echo 0)
+  if [ "${pid:-0}" != "0" ] && [ -d "/proc/${pid}" ]; then
+    printf '%-14s %s\n' "主进程:" "PID ${pid}, 属主 $(ps -o user= -p "$pid" 2>"$NULL_DEV" | tr -d ' ')"
+    printf '%-14s %s\n' "内存(RSS):" "$(ps -o rss= -p "$pid" 2>"$NULL_DEV" | awk '{printf "%.1f MB", $1/1024}')"
+    printf '%-14s %s\n' "CPU 时间:" "$(ps -o time= -p "$pid" 2>"$NULL_DEV" | tr -d ' ')"
+  fi
+
+  printf '%-14s %s\n' "DSH 版本:" "$(run_as_whale "$DSH_BIN" --version 2>"$NULL_DEV" | head -1 || echo unknown)"
+  local pver
+  pver=$(python3 -c "import json;print(json.load(open('${PROFILE_DIR}/node_modules/@zaofan/dsh-qqbot/package.json'))['version'])" 2>"$NULL_DEV" || echo "未安装")
+  printf '%-14s %s\n' "插件版本:" "$pver"
+  printf '%-14s %s\n' "数据体积:" "$(du -sh "$DATA_ROOT" 2>"$NULL_DEV" | cut -f1 || echo unknown)"
+
+  echo
+  echo "提示: whale-ctl monitor  可做进程/端口/网关/模型四层健康检查"
+}
+
+cmd_logs() {
+  local follow=0 lines=80
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow) follow=1 ;;
+      -n) shift; lines="${1:-}" ;;
+      *) lines="$1" ;;
+    esac
+    shift
+  done
+  case "$lines" in ''|*[!0-9]*) echo "行数必须为非负整数" >&2; return 1 ;; esac
+  if [ ! -f "${WHALE_ROOT}/logs/dsh.log" ] && ! systemctl is-active "$SERVICE" >"$NULL_DEV" 2>&1; then
+    echo "[提示] 服务未运行且无日志文件。"
+  fi
+  if [ "$follow" -eq 1 ]; then
+    tail -n "$lines" -F "${WHALE_ROOT}/logs/dsh.log" "${WHALE_ROOT}/logs/dsh.err.log" 2>"$NULL_DEV"
+  else
+    echo "--- 最近 ${lines} 行 stdout ---"
+    tail -n "$lines" "${WHALE_ROOT}/logs/dsh.log" 2>"$NULL_DEV" || echo "(无)"
+    echo "--- 最近 ${lines} 行 stderr（含启动错误）---"
+    tail -n "$lines" "${WHALE_ROOT}/logs/dsh.err.log" 2>"$NULL_DEV" || echo "(无)"
+  fi
+}
+
+cmd_start()   { sysctl_user start   "$SERVICE" && echo "已启动"; }
+cmd_stop()    { sysctl_user stop    "$SERVICE" && echo "已停止"; }
+cmd_restart() { sysctl_user restart "$SERVICE" && echo "已重启"; }
+
+cmd_service() {
+  local action="$1"
+  case "$action" in
+    start|stop|restart) "cmd_${action}" ;;
+    *) echo "用法: whale-ctl service start|stop|restart" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# 访问控制：把某人的 openid 加入私聊白名单
+# ---------------------------------------------------------------------------
+cmd_allow_admin() {
+  local openid="${1:-}"
+  [ -n "$openid" ] || { echo "用法: whale-ctl allow-admin <32位openid>"; return 1; }
+  case "$openid" in
+    *[!0-9A-Fa-f]*|'') echo "[错误] openid 应为 32 位十六进制字符串"; return 1 ;;
+  esac
+  [ "${#openid}" -eq 32 ] || { echo "[错误] openid 长度应为 32（当前 ${#openid}）"; return 1; }
+
+  echo "当前白名单: $(patch_get c2cAllow)"
+  echo "将把 ${openid} 写入 c2cAllow。"
+
+  local bak
+
+  bak="${PATCH}.bak-$(date +%Y%m%d-%H%M%S)"
+  cp -p "$PATCH" "$bak" || return 1
+
+  python3 - "$PATCH" "$openid" <<'PY'
+import re, sys, pathlib
+path, openid = sys.argv[1], sys.argv[2]
+p = pathlib.Path(path); text = p.read_text(encoding='utf-8')
+
+# 定位 im-qqbot 段里的 c2cAllow（可能是 [] 也可能是已有列表）
+m = re.search(r'^([ \t]*)c2cAllow:[ \t]*(\[[^\]]*\])?[ \t]*$', text, re.M)
+if not m:
+    sys.exit("未找到 c2cAllow 键")
+indent = m.group(1)
+cur = (m.group(2) or '[]').strip()
+
+if cur in ('[]', '[ ]', ''):
+    new = f"{indent}c2cAllow: ['{openid}']"
+else:
+    inner = cur[1:-1].strip()
+    items = [x.strip().strip("'\"") for x in inner.split(',') if x.strip()]
+    if openid not in items:
+        items.append(openid)
+    new = f"{indent}c2cAllow: [" + ', '.join(f"'{i}'" for i in items) + "]"
+
+text = text[:m.start()] + new + text[m.end():]
+
+# 同时确保 c2cMode 是 allowlist（若是 disabled 则一并打开，否则白名单不生效）
+text = re.sub(r'^([ \t]*)c2cMode:[ \t]*\S+', lambda mm: f"{mm.group(1)}c2cMode: allowlist", text, count=1, flags=re.M)
+p.write_text(text, encoding='utf-8')
+print("已更新 c2cAllow 与 c2cMode")
+PY
+  local rc=$?
+  if [ $rc -ne 0 ]; then echo "[错误] 写入失败，原文件已备份: $bak"; return 1; fi
+
+  echo "新白名单: $(patch_get c2cAllow)"
+  sysctl_user restart "$SERVICE"
+  echo "私聊白名单已生效"
+}
+
+# 从插件台账中提取出现过的 user openid（用于首次绑定管理员）
+cmd_list_openids() {
+  if [ -f "${DATA_ROOT}/.bind-openids" ]; then
+    echo "绑定窗口记录的私聊发送者 openid（请核对身份）:"
+    sort -u "${DATA_ROOT}/.bind-openids"
+  fi
+  local f="${DATA_ROOT}/.qqbot/affinity.json"
+  if [ ! -f "$f" ]; then
+    echo "尚未产生台账文件: $f"
+    echo "请先用你的 QQ 私聊机器人发一条消息（首次部署时 c2cMode 需临时为 open），"
+    echo "之后再运行本命令即可看到你的 openid。"
+    [ -s "${DATA_ROOT}/.bind-openids" ] && return 0
+    return 1
+  fi
+  echo "=== 台账中出现的用户（openid 与昵称）==="
+  python3 - "$f" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+rows = []
+if isinstance(d, dict):
+    for k, v in d.get("map", {}).items():
+        if isinstance(v, dict):
+            rows.append((k.removeprefix('person:'), v.get('name') or v.get('nick') or ''))
+        else:
+            rows.append((k, ''))
+rows.sort(key=lambda r: r[0])
+for k, n in rows[:50]:
+    print(f"  {k}   {n}")
+print(f"共 {len(rows)} 条")
+PY
+}
+
+# 禁止全开放；bootstrap-close 关闭私聊（有明确风险提示与自动收回）
+cmd_bind_capture() {
+  # Remain disabled throughout: no one gets a reply or model access.
+  patch_set c2cMode "disabled"
+  run_as_whale python3 - "$DATA_ROOT" <<'BIND'
+from pathlib import Path
+import sys, time
+r=Path(sys.argv[1]); (r/'.bind-until').write_text(str(int(time.time()*1000)+300000))
+f=r/'.bind-openids'; f.write_text(''); f.chmod(0o600)
+BIND
+  sysctl_user restart "$SERVICE"
+  echo "5 分钟内用你的 QQ 私聊一次，再执行 whale-ctl list-openids。私聊仍禁止回复，不调用模型。"
+  echo "名单可能含陌生发送者；核对自己的消息时间后再 allow-admin，不自动信任第一位。"
+}
+cmd_bootstrap_open() {
+  echo "已禁用全开放绑定。使用官方平台获得你的 openid 后执行 allow-admin <openid>。" >&2
+  echo "如平台不显示 openid，运行 whale-ctl bind-capture，再私聊一次；仅记录发送者ID，不调用模型。" >&2
+  return 1
+}
+cmd_bootstrap_close() {
+  patch_set c2cMode "disabled" && sysctl_user restart "$SERVICE"
+}
+
+# ---------------------------------------------------------------------------
+# 群聊开关（默认关闭；确认安全后再打开）
+# ---------------------------------------------------------------------------
+cmd_group_mode() {
+  local mode="${1:-}"
+  case "$mode" in
+    off|disabled)
+      patch_set groupMode "disabled" && sysctl_user restart "$SERVICE" && echo "群聊已关闭"
+      ;;
+    on|allowlist)
+      shift
+      if [ $# -eq 0 ]; then
+        echo "[错误] 打开群聊必须同时给出群 openid 白名单（不接受空列表）。"
+        echo "        原因：插件的 accessPolicy 在白名单为空时会退化成放行所有人（fail-open）。"
+        echo "        用法: whale-ctl group-mode allowlist <群openid> [更多...]"
+        return 1
+      fi
+      local gid
+      for gid in "$@"; do
+        [[ "$gid" =~ ^[A-Fa-f0-9]{32}$ ]] || { echo "无效群 openid" >&2; return 1; }
+      done
+      local bak
+      bak="${PATCH}.bak-$(date +%Y%m%d-%H%M%S)"; cp -p "$PATCH" "$bak"
+      python3 - "$PATCH" "$@" <<'PY'
+import re, sys, pathlib
+path, ids = sys.argv[1], sys.argv[2:]
+p = pathlib.Path(path); text = p.read_text(encoding='utf-8')
+lst = '[' + ', '.join(f"'{i}'" for i in ids) + ']'
+text, n = re.subn(r'^([ \t]*)groupAllow:[ \t]*\[[^\]]*\]', lambda m: f"{m.group(1)}groupAllow: {lst}", text, count=1, flags=re.M)
+if n != 1: sys.exit("未找到唯一 groupAllow，拒绝修改")
+text = re.sub(r'^([ \t]*)groupMode:[ \t]*\S+', lambda m: f"{m.group(1)}groupMode: allowlist", text, count=1, flags=re.M)
+p.write_text(text, encoding='utf-8')
+print("已写入群白名单:", lst)
+PY
+      sysctl_user restart "$SERVICE" && echo "群聊已开启（仅白名单群可触发）"
+      ;;
+    show)
+      echo "groupMode : $(patch_get groupMode)"
+      echo "groupAllow: $(patch_get groupAllow)"
+      ;;
+    *) echo "用法: whale-ctl group-mode off | allowlist <群openid...> | show" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# 表情包自动采集开关（默认关 —— 这是唯一会无上限增长的磁盘占用）
+# ---------------------------------------------------------------------------
+cmd_sticker_collect() {
+  case "${1:-show}" in
+    on)  patch_set collectEnabled "true"  && sysctl_user restart "$SERVICE" && \
+         echo "已开启自动采集。请同时确认 whale-quota.sh 的定时任务已启用，防止磁盘被图片填满。" ;;
+    off) patch_set collectEnabled "false" && sysctl_user restart "$SERVICE" && echo "已关闭自动采集" ;;
+    *)   echo "collectEnabled = $(patch_get collectEnabled)" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# 官方高能力 preset 的临时放行（管理员自用；用完请收回）
+# ---------------------------------------------------------------------------
+cmd_admin_presets() {
+  case "${1:-show}" in
+    show) grep -A3 -E '^- id: preset-(standard|ptc|minimal|cordis)' "$PATCH" ;;
+    *) echo "高能力 preset 在 QQ 实例内固定关闭；此命令不再改变安全边界。" >&2; return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# 备份 / 恢复 / 监控 / 配额（转发给独立脚本）
+# ---------------------------------------------------------------------------
+cmd_forward() {
+  local script="$1"; shift
+  local p="${WHALE_ROOT}/bin/${script}"
+  [ -x "$p" ] || p="$(dirname "$(readlink -f "$0")")/${script}"
+  [ -f "$p" ] || { echo "[错误] 找不到脚本: ${script}"; return 1; }
+  if [ "$script" = whale-backup.sh ]; then
+    run_as_whale bash "$p" "$@"
+  else
+    bash "$p" "$@"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 升级（带自动备份；失败可回滚）
+# ---------------------------------------------------------------------------
+cmd_update() {
+  echo "自动升级已停用：当前仅审查了 1.10.9，本地安全补丁必须随升级重新验证。" >&2
+  echo "先在离线副本审计新版本、适配 harden-plugin.py 并运行回归，再部署。" >&2
+  return 1
+}
+
+cmd_help() {
+  cat <<'EOF'
+whale-ctl —— QQ 小鲸鱼管理工具
+
+运行控制
+  status                     查看服务/端口/版本/资源占用
+  start | stop | restart     服务控制
+  logs [-f] [行数]           查看日志（-f 持续跟踪）
+  monitor                    四层健康检查（进程/端口/网关/模型）
+  quota                      磁盘配额检查
+
+数据
+  backup [参数]              版本化备份（转发 whale-backup.sh）
+  restore <文件> [--dry-run]  恢复（转发 whale-restore.sh）
+  update <版本>              升级暂关闭（须先审计并适配安全补丁）
+  rollback                   仅恢复数据（同 restore，须先停止小鲸鱼）
+
+安全开关
+  allow-admin <openid>       把管理员 openid 写入私聊白名单
+  list-openids               从台账里列出出现过的 openid
+  bind-capture               限时记录被拒私聊的发送者ID（不回复）
+  bootstrap-open/-close      禁止全开放；bootstrap-close 关闭私聊
+  group-mode off|allowlist <群openid...>|show
+                             群聊开关（打开必须显式给白名单）
+  sticker-collect on|off|show
+                             表情包自动采集开关
+  admin-presets on|off|show  临时放行官方高能力 preset（管理员自用）
+
+其他
+  config-path                打印配置文件路径
+  help                       本帮助
+EOF
+}
+
+# ---------------------------------------------------------------------------
+require_root_or_self
+case "${1:-help}" in
+  status)          cmd_status ;;
+  start|stop|restart) "cmd_$1" ;;
+  service)         shift; cmd_service "$@" ;;
+  logs)            shift; cmd_logs "$@" ;;
+  monitor)         shift; cmd_forward whale-monitor.sh "$@" ;;
+  quota)           shift; cmd_forward whale-quota.sh "$@" ;;
+  backup)          shift; cmd_forward whale-backup.sh "$@" ;;
+  restore|rollback) shift; cmd_forward whale-restore.sh "$@" ;;
+  update)          shift; cmd_update "$@" ;;
+  allow-admin)     shift; cmd_allow_admin "$@" ;;
+  list-openids)    cmd_list_openids ;;
+  bind-capture)    cmd_bind_capture ;;
+  bootstrap-open)  cmd_bootstrap_open ;;
+  bootstrap-close) cmd_bootstrap_close ;;
+  group-mode)      shift; cmd_group_mode "$@" ;;
+  sticker-collect) shift; cmd_sticker_collect "$@" ;;
+  admin-presets)   shift; cmd_admin_presets "$@" ;;
+  config-path)     echo "$PATCH" ;;
+  help|-h|--help)  cmd_help ;;
+  *) echo "未知子命令: $1"; echo; cmd_help; exit 1 ;;
+esac

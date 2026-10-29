@@ -1,0 +1,18 @@
+[project]
+name = "qq-agent-console"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography==46.0.3",
+    "fastapi==0.119.1",
+    "httpx==0.28.1",
+    "uvicorn==0.38.0",
+    "websockets==15.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "playwright==1.56.0",
+    "pytest==8.4.2",
+    "pytest-asyncio==1.2.0",
+]

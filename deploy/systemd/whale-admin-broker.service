@@ -1,0 +1,39 @@
+[Unit]
+Description=Whale scoped administration broker (local Unix socket)
+After=network.target
+[Service]
+Type=simple
+User=root
+Group=whaleadmin
+WorkingDirectory=/opt/whale-admin
+ExecStart=/usr/bin/python3 -B /opt/whale-admin/server.py broker
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=3
+UMask=0077
+RuntimeDirectory=whale-admin
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/whale-admin-broker /home/qqwhale/.dsh /home/qqwhale/whale/data /home/qqwhale/whale/etc /home/qqwhale/whale/backups /home/qqwhale/whale/workspace
+ReadOnlyPaths=/home/qqwhale/whale/bin /home/qqwhale/whale/data/.qqbot-extensions
+PrivateTmp=yes
+PrivateDevices=yes
+BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
+StandardInput=data
+StandardInputData=AA==
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID
+# Keep this existing bounded capability effective for the Python broker's
+# subprocess credential drop; changing to qqwhale clears the ambient set.
+AmbientCapabilities=CAP_SETUID
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+MemoryMax=384M
+CPUQuota=40%
+[Install]
+WantedBy=multi-user.target

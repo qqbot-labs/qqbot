@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "cooldownSec": 300,
+  "models": [
+    "cn:glm-5.3-flash",
+    "cn:glm-5v-turbo"
+  ]
+}

@@ -1,0 +1,34 @@
+[Unit]
+Description=QQ Agent isolated Qzone bridge
+After=network.target
+StartLimitBurst=3
+StartLimitIntervalSec=300
+[Service]
+User=qqagent-qzone
+Group=qqagent-qzone
+WorkingDirectory=/opt/qq-agent/bridge
+Environment=HOME=/var/lib/qq-agent-qzone
+Environment=QQAGENT_BRIDGE_TOKEN_FILE=/etc/qq-agent/qzone-token
+Environment=QQAGENT_QZONE_DATA=/var/lib/qq-agent-qzone
+Environment=QZONE_PLAYWRIGHT_HEADLESS=1
+Environment=QZONE_PLAYWRIGHT_CHANNEL=
+Environment=QZONE_CACHE_PATH=/var/lib/qq-agent-qzone
+Environment=QZONE_DEBUG_DUMP=0
+Environment=QZONE_STARTUP_WRITE_PROBE=0
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/qq-agent/browsers
+ExecStart=/usr/bin/node /opt/qq-agent/deploy/qzone-browser.mjs --run
+Restart=on-failure
+RestartSec=30
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+BindPaths=/var/lib/qq-agent-dev/null:/dev/null
+ReadWritePaths=/var/lib/qq-agent-qzone
+MemoryMax=650M
+StandardOutput=null
+StandardError=null
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,167 @@
+# =============================================================================
+# qqwhale.service —— QQ AI 机器人「小鲸鱼」的 systemd 单元（**system 级**）
+# =============================================================================
+# 【为什么是 system 单元而不是用户单元 —— 真机实测后的结论，改前务必读完】
+#
+# 最初按计划做成 `systemctl --user` 用户级单元。在这台 VPS（Ubuntu 24.04.5）
+# 上实测发现两条硬性阻碍：
+#
+#   1) /dev/null 被改成 crw------- root（宿主机既有异常，非本项目改动）。
+#      用户级服务由 systemd --user 管理器（本身是 qqwhale 这个非 root 用户）
+#      代劳准备 stdin，它打不开 /dev/null，于是任何用户级服务都以
+#          208/STDIN "Failed to set up standard input: Permission denied"
+#      启动失败。已用最小单元逐一对照验证：StandardInput=null 与
+#      StandardInput=data（不带数据）都失败。
+#
+#   2) 内核启用了 kernel.apparmor_restrict_unprivileged_userns=1（Ubuntu 24.04
+#      默认值），非特权命名空间被禁止 ⇒ systemd --user 无法为服务创建挂载
+#      命名空间，ProtectSystem / ProtectHome / PrivateTmp / ReadWritePaths
+#      这些沙箱**全部被静默忽略**（journal 只留一句
+#      "UTS namespace setup is prohibited ... ignoring namespace setup"）；
+#      而 ProtectKernelModules / ProtectClock / PrivateDevices 会以
+#      218/CAPABILITIES 硬失败，服务根本起不来。
+#
+# 改为 system 单元后（PID 1=root 创建命名空间，再降权到 User=qqwhale 执行），
+# 两条同时解决，且**沙箱真正生效** —— 已用探针单元在真机实测：
+#     /etc、/usr、~  → Read-only file system
+#     ~/.dsh、~whale/{data,logs,workspace} → 可写（精确白名单）
+#     /dev           → 仅 20 个伪设备节点（PrivateDevices）
+#     CapEff=0（无有效 capability）、ExecMainStatus=0（无硬失败）
+#
+# 代价与边界（如实记录）：这是**新增**的系统级单元文件，不改动、不重启、
+# 不影响本机任何既有服务；进程本身仍以无特权用户 qqwhale 运行。
+#
+# 无 root 场景可退回用户级单元：见同目录 qqwhale.service.user-unit.bak
+# （需删掉 User=/Group=、把绝对路径换成 %h、去掉 ProtectKernelModules /
+#  ProtectClock / PrivateDevices，并保留 StandardInput 两行）。功能可用，
+#  但文件系统沙箱在该主机上不会生效 —— 不要当成等效隔离。
+# =============================================================================
+
+[Unit]
+StartLimitIntervalSec=120
+StartLimitBurst=5
+Description=QQ AI 机器人小鲸鱼（DeepSeek Harness Web + QQ 网关）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- 运行身份 ---------------------------------------------------------------
+# 以专用无特权用户运行；本单元自身的 root 权限仅用于建立沙箱，随后立即降权。
+# 该用户不属于 sudo/wheel/docker/podman 等任何特权组（部署脚本会校验）。
+User=qqwhale
+Group=qqwhale
+
+WorkingDirectory=/home/qqwhale/whale/workspace
+
+# --- 环境变量 ---------------------------------------------------------------
+Environment=DSH_HOME=/home/qqwhale/.dsh
+Environment=HOME=/home/qqwhale
+Environment=NODE_ENV=production
+# ★ 安全边界（必须保留）：文件沙箱钉死在只读。DSH 的 agent preset 已不加载
+#   任何文件/命令工具，这一层是纵深防御的第二道。
+Environment=DSH_PERMISSION_MODE=read-only
+Environment=WHALE_WEB_PORT=3080
+Environment=PATH=/home/qqwhale/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# 凭据文件（权限 600、属主 qqwhale）。前缀 `-`：文件不存在时不报错，
+# 服务仍能启动，由应用提示缺少 AppID/AppSecret。
+EnvironmentFile=-/home/qqwhale/whale/etc/qqbot.env
+
+# --- 标准输入（务必保留）----------------------------------------------------
+# 这台机器的 /dev/null 是 crw------- root，非 root 打开会失败；systemd 默认
+# （StandardInput=null）与 StandardInput=data（不带数据）都会去开 /dev/null
+# 因而失败。下面这组用匿名管道代替，已实测可用。
+StandardInput=data
+StandardInputData=AA==
+
+# /dev/null 修复（完全限定在项目内，不改宿主机任何配置）
+# 本机 /dev/null 被改成 crw------- root，非 root 打不开；而 systemd 的私有 /dev
+# 是从宿主 bind 标准设备节点，所以沙箱内权限照旧 —— 任何 `>/dev/null` 都会失败
+# （实测：监控脚本因此报错、逻辑中断；DSH 自身暂未受影响但存在同样风险）。
+# 做法：在项目目录里放一个权限正确的 null 节点，用 BindPaths 覆盖服务内的 /dev/null。
+# 已实测：沙箱内变成 crw-rw-rw- 且可写。宿主机 /dev/null 保持原样、不受影响。
+BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
+
+
+# --- 启动命令 ---------------------------------------------------------------
+# 端口占位符 3080 由 deploy/install.sh 渲染为真实端口。
+# --host 127.0.0.1：只监听本机回环，远程管理走 SSH 端口转发（DSH 自身也拒绝 0.0.0.0）。
+# --no-open：无人值守环境不尝试打开浏览器。
+ExecStartPre=/usr/bin/python3 /home/qqwhale/whale/bin/harden-plugin.py --check /home/qqwhale/.dsh/profiles/web/node_modules/@zaofan/dsh-qqbot
+ExecStart=/home/qqwhale/whale/app/node_modules/.bin/dsh web --no-open --port 3080 --host 127.0.0.1
+
+# --- 重启与停止 -------------------------------------------------------------
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+# KillMode=mixed：先给主进程 SIGTERM 让它优雅收尾（关网关、刷盘会话），
+# 超时后再对 cgroup 内残留子进程 SIGKILL，避免留下孤儿进程。
+KillMode=mixed
+# 启动频率限制：异常时不要无限重启刷日志。
+# 新建文件默认掩码：日志/数据只对本用户可读（日志含聊天内容，不要 world-readable）。
+UMask=0077
+
+# --- 沙箱硬化（以下各项均已在真机实测生效）---------------------------------
+# [1] 提权与内核面
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 ::1/128 fc00::/7 fe80::/10
+# Authorized model endpoint resolves to this host; private/link-local denies remain.
+# Bind only the management port. Loopback outbound isolation is not provided by this rule.
+SocketBindDeny=any
+SocketBindAllow=ipv4:tcp:3080
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# 禁止新建命名空间（含用户命名空间），显著缩小内核攻击面。
+# 注意：若将来把 DSH 的沙箱后端换成依赖命名空间实现（如 bubblewrap），
+# 这一行会使其失败，届时改为 RestrictNamespaces=~user 或注释掉。
+RestrictNamespaces=yes
+
+# [2] 文件系统隔离（真机实测：/etc、/usr、~ 均为 Read-only file system）
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+# 为什么用 read-only 而不是 yes：DSH_HOME 与全部数据都在家目录内，
+# ProtectHome=yes 会让它们彻底不可见，服务无法工作。
+# read-only 先把整个家目录锁成只读，再用下面的 ReadWritePaths 精确开洞。
+ProtectHome=read-only
+# 唯一允许写入的四个位置（其余一律只读）：
+#   /home/qqwhale/.dsh              DSH_HOME：profiles / sessions / settings / 凭据
+#   /home/qqwhale/whale/data        插件数据根：表情包库、好感度台账、定时任务状态
+#   /home/qqwhale/whale/logs        应用标准输出/错误日志
+#   /home/qqwhale/whale/workspace   Agent 工作目录
+# 这四个目录必须**已存在**，否则 systemd 在挂载命名空间阶段直接拒绝启动
+# （刻意的 fail-fast；deploy/install.sh 阶段 2 会先建好）。
+ReadWritePaths=/home/qqwhale/.dsh /home/qqwhale/whale/data /home/qqwhale/whale/logs /home/qqwhale/whale/workspace
+# 显式只读：程序目录与凭据目录 —— 服务即使被攻破也无法改写自己的代码或凭据。
+ReadOnlyPaths=/home/qqwhale/whale/app /home/qqwhale/whale/etc /home/qqwhale/whale/data/.qqbot-extensions /home/qqwhale/.dsh/profiles/web/node_modules
+
+# [3] 内存可执行权限（务必保持 no）
+# MemoryDenyWriteExecute=yes 会禁止"可写且可执行"的内存映射，而 V8 的 JIT 正是
+# 依赖它：打开后 Node 启动即崩溃（段错误或 mprotect 报错）。
+MemoryDenyWriteExecute=no
+
+# --- 资源限制（按 VPS 余量调整）---------------------------------------------
+# 这台 VPS 还有别的生产服务，因此给机器人明确的天花板：
+MemoryMax=768M
+MemoryHigh=640M
+CPUQuota=60%
+TasksMax=256
+LimitNOFILE=8192
+
+# --- 日志落盘 ---------------------------------------------------------------
+StandardOutput=append:/home/qqwhale/whale/logs/dsh.log
+StandardError=append:/home/qqwhale/whale/logs/dsh.err.log
+
+[Install]
+WantedBy=multi-user.target

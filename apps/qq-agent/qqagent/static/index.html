@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f3f5f7">
+  <title>QQ Agent · 管理台</title>
+  <script src="/static/theme.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳转到主要内容</a>
+  <div id="login" class="login">
+    <div class="login-card">
+      <div class="brand">Q<span>Q</span> / AGENT</div>
+      <h1>你的社交 Agent，<br>由你掌控。</h1>
+      <p class="muted">统一管理 · 独立权限 · 清晰记录</p>
+      <form id="login-form">
+        <label for="password">管理密码</label>
+        <input id="password" type="password" autocomplete="current-password" maxlength="200" required aria-describedby="login-error">
+        <button class="primary" type="submit">进入管理台 →</button>
+      </form>
+      <p class="muted small">使用主人设置的管理密码登录。</p>
+      <p id="login-error" role="alert"></p>
+      <noscript><p>管理台需要启用 JavaScript；停用时无法显示真实状态或提交操作。</p></noscript>
+    </div>
+    <div class="login-aside" aria-hidden="true"><div class="orbit">Q</div><p>一个入口，照看每一次互动。</p><span>所有主动行为默认关闭 · 人格由你填写</span></div>
+  </div>
+  <div id="shell" hidden>
+    <aside>
+      <div class="brand">Q<span>Q</span> / AGENT</div>
+      <p class="eyebrow">工作空间</p>
+      <nav id="nav" aria-label="管理页面"></nav>
+      <div class="aside-bottom"><span class="dot" aria-hidden="true"></span>自托管管理台 <button id="logout" class="text-btn" type="button">退出</button></div>
+    </aside>
+    <div class="workspace">
+      <header>
+        <span id="crumb">工作空间 / 总览</span>
+        <div class="header-actions">
+          <button id="theme-toggle" class="theme-toggle" type="button" aria-label="切换到深色模式" aria-pressed="false">
+            <span class="theme-icon" data-theme-icon aria-hidden="true">☀</span>
+            <span class="theme-label" data-theme-label>浅色</span>
+          </button>
+          <div class="safety" aria-label="持久化安全控制">
+            <button id="pause" class="small-button" type="button">暂停主动行为（状态待刷新）</button>
+            <button id="stop" class="danger small-button" type="button">停止所有发信（状态待刷新）</button>
+          </div>
+        </div>
+      </header>
+      <main id="main" tabindex="-1"></main>
+      <footer>QQ Agent · 权限与发送状态由后端强制执行 <span>v0.1.0</span></footer>
+    </div>
+  </div>
+  <div id="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

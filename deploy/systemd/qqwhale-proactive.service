@@ -1,0 +1,27 @@
+[Unit]
+Description=QQ Whale proactive check-in (fixed peer, bounded frequency)
+After=qqwhale.service network-online.target
+[Service]
+Type=oneshot
+User=qqwhale
+Group=qqwhale
+WorkingDirectory=/home/qqwhale/whale/workspace
+Environment=DSH_HOME=/home/qqwhale/.dsh
+ExecStart=/usr/bin/python3 /opt/whale-admin/proactive.py
+StandardInput=data
+StandardInputData=AA==
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/qqwhale/whale/data/qqwhale
+BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=192M
+CPUQuota=20%
+TimeoutStartSec=110

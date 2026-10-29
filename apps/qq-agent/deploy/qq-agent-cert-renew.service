@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew QQ Agent domain certificate only
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/snap/bin/certbot renew --no-directory-hooks --cert-name qqbot.example.com --quiet --deploy-hook "/usr/bin/systemctl reload nginx"
+UMask=0077

@@ -1,0 +1,17 @@
+[Unit]
+Description=QQ Agent fixed NapCat and official stable QQ runtime
+After=docker.service network.target
+Requires=docker.service
+[Service]
+Type=simple
+ExecStart=/opt/qq-agent/deploy/run-napcat.sh
+ExecStartPost=/usr/bin/python3 /opt/qq-agent/deploy/probe-napcat.py
+ExecStop=/usr/bin/docker stop -t 15 qq-agent-napcat
+ExecStopPost=/usr/bin/rm -f /opt/qq-agent/artifacts/runtime-proof.json
+Restart=no
+TimeoutStartSec=60
+TimeoutStopSec=30
+StandardOutput=null
+StandardError=null
+[Install]
+WantedBy=multi-user.target

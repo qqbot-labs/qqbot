@@ -1,0 +1,53 @@
+# =============================================================================
+# qqwhale-quota.service —— 数据目录配额守护（由 qqwhale-quota.timer 触发）
+# =============================================================================
+# 默认**只告警、不删除**。这是刻意的：机器人的表情包库是用户自己的数据，
+# 自动删除属于破坏性操作，必须由人确认。需要回收时手工执行：
+#     whale-ctl quota --reclaim
+# 退出码：0=在限内，1=超额（有告警）。
+# =============================================================================
+[Unit]
+Description=QQ 小鲸鱼数据目录配额检查（默认只告警）
+
+[Service]
+Type=oneshot
+User=qqwhale
+Group=qqwhale
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+ReadOnlyPaths=/home/qqwhale/whale
+ReadWritePaths=/home/qqwhale/whale/logs
+StandardInput=data
+StandardInputData=AA==
+
+# /dev/null 修复（完全限定在项目内，不改宿主机任何配置）
+# 本机 /dev/null 被改成 crw------- root，非 root 打不开；而 systemd 的私有 /dev
+# 是从宿主 bind 标准设备节点，所以沙箱内权限照旧 —— 任何 `>/dev/null` 都会失败
+# （实测：监控脚本因此报错、逻辑中断；DSH 自身暂未受影响但存在同样风险）。
+# 做法：在项目目录里放一个权限正确的 null 节点，用 BindPaths 覆盖服务内的 /dev/null。
+# 已实测：沙箱内变成 crw-rw-rw- 且可写。宿主机 /dev/null 保持原样、不受影响。
+BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
+
+Environment=HOME=/home/qqwhale
+Environment=WHALE_ROOT=/home/qqwhale/whale
+Environment=WHALE_DATA_MAX_MB=512
+ExecStart=/home/qqwhale/whale/bin/whale-quota.sh
+ExecStopPost=/usr/sbin/logrotate --state /home/qqwhale/whale/logs/logrotate.state /home/qqwhale/whale/etc/logrotate.conf
+
+[Install]
+WantedBy=multi-user.target

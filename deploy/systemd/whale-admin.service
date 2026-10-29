@@ -1,0 +1,35 @@
+[Unit]
+Description=Whale private management GUI
+After=network.target whale-admin-broker.service
+Requires=whale-admin-broker.service
+[Service]
+Type=simple
+User=whaleadmin
+Group=whaleadmin
+WorkingDirectory=/opt/whale-admin
+ExecStart=/usr/bin/python3 -B /opt/whale-admin/server.py web
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/whale-admin
+PrivateTmp=yes
+PrivateDevices=yes
+BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
+StandardInput=data
+StandardInputData=AA==
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+MemoryMax=256M
+CPUQuota=30%
+[Install]
+WantedBy=multi-user.target

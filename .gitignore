@@ -1,0 +1,63 @@
+# Dependencies and runtimes
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+
+# Runtime data and private conversations
+data/
+logs/
+backups/
+*.log
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+*.qrcode
+qrcode.png
+qqbot.env
+qzone-token
+admin-password.txt
+
+# Secrets and credentials
+.env
+*.env
+!*.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Generated downloads and build artifacts
+artifacts/
+browsers/
+diagnostic-tools/
+test-results/
+vendor/
+*.tar.gz
+*.tgz
+*.zip
+*.deb
+*.exe
+*.msi
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+._*
+.vscode/
+.idea/
+*.bak
+*.bak-*
+*.orig
+*.rej
+
+# Local environment files
+*.local

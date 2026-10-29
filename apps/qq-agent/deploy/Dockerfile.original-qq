@@ -1,0 +1,18 @@
+ARG BASE
+FROM ${BASE}
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libgtk-3-0 libxss1 libxtst6 xvfb xauth unzip ca-certificates python3 && rm -rf /var/lib/apt/lists/*
+ENV QQAGENT_EXPECTED_QQ=3.2.16-32793
+COPY qq-original-tree/opt/QQ /runtime/qq/opt/QQ
+COPY qq-original-provenance.json /runtime/qq-provenance.json
+# Verify every regular QQ file recovered from the digest-pinned upstream layer before patching main.
+RUN python3 -c 'import hashlib,json,pathlib; p=json.load(open("/runtime/qq-provenance.json")); assert p["version"]=="3.2.16-32793"; [(None if hashlib.sha256((pathlib.Path("/runtime/qq")/name).read_bytes()).hexdigest()==value else (_ for _ in ()).throw(ValueError("QQ hash mismatch"))) for name,value in p["files"].items()]'
+COPY NapCat.Shell.4.6.7.zip /tmp/napcat.zip
+RUN echo 'a4ac67ebe93c1ad2ccd43231e71c50021f20a673e9297a25a87ed45f8f8d20ea  /tmp/napcat.zip' | sha256sum -c - && mkdir -p /runtime/napcat && unzip -q /tmp/napcat.zip -d /runtime/napcat && rm /tmp/napcat.zip
+COPY setup-qq.py /runtime/setup-qq.py
+COPY launch-napcat.sh /runtime/launch.sh
+RUN python3 /runtime/setup-qq.py && chmod 0755 /runtime/launch.sh && useradd -u 19340 -m -s /usr/sbin/nologin qqruntime
+WORKDIR /runtime/napcat
+USER 19340:19340
+ENV HOME=/home/qqruntime
+ENV ELECTRON_DISABLE_SECURITY_WARNINGS=true
+ENTRYPOINT ["/runtime/launch.sh"]

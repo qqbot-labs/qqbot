@@ -1,0 +1,9 @@
+[Unit]
+Description=Check QQ Whale proactive policy every five minutes
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Unit=qqwhale-proactive.service
+[Install]
+WantedBy=timers.target

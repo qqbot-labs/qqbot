@@ -1,0 +1,14 @@
+ARG BASE
+FROM ${BASE}
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libgtk-3-0 libxss1 libxtst6 xvfb xauth unzip ca-certificates python3 && rm -rf /var/lib/apt/lists/*
+COPY QQ_3.2.34_260924_amd64_01.deb /tmp/qq.deb
+COPY NapCat.Shell.4.6.7.zip /tmp/napcat.zip
+RUN mkdir -p /runtime/qq /runtime/napcat && dpkg-deb -x /tmp/qq.deb /runtime/qq && unzip -q /tmp/napcat.zip -d /runtime/napcat && rm /tmp/qq.deb /tmp/napcat.zip
+COPY setup-qq.py /runtime/setup-qq.py
+RUN python3 /runtime/setup-qq.py
+COPY launch-napcat.sh /runtime/launch.sh
+RUN chmod 0755 /runtime/launch.sh && useradd -u 19340 -m -s /usr/sbin/nologin qqruntime && chmod -R a+rX /runtime
+USER 19340:19340
+ENV HOME=/home/qqruntime
+ENV ELECTRON_DISABLE_SECURITY_WARNINGS=true
+ENTRYPOINT ["/runtime/launch.sh"]
