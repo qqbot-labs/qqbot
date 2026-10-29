@@ -1,6 +1,6 @@
 # 双人协作流程
 
-仓库：`https://github.com/yumi-0412/qqbot`
+仓库：`https://github.com/qqbot-labs/qqbot`
 
 正式分支：`main`
 
