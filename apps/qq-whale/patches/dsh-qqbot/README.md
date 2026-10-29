@@ -22,6 +22,6 @@ python3 -m unittest discover -s apps/whale-admin/tests -v
 
 集成测试调用真实插件的发送函数，QQ 客户端使用夹具，不发真实消息；不提供 `QQBOT_OUTBOUND` 时发送测试明确跳过。CI 会解包固定 npm 版本并实际运行发送集成测试。生产使用非流式发送，并在 `ExecStartPre` 同时检查权限补丁和分条补丁。
 
-部署还需同步 `bin/chat-format.mjs`、`patches/dsh-qqbot/`、工作区指令及私有 profile 内的格式规则。人格、每轮注入、长期偏好不能再包含“禁止空行分条”或强制凑字数的旧要求。私人人格不复制进公开仓库。
+部署还需同步 `bin/chat-format.mjs`、`patches/dsh-qqbot/`、工作区指令及私有 profile 内的格式规则。QQ 专用 persona 需使用 `complete: true`，避免默认编程助手提示词混入。人格、每轮注入、长期偏好不能再包含“禁止空行分条”或强制凑字数的旧要求。私人人格不复制进公开仓库。
 
 QQ 平台的被动回复窗口、每条入站的回复额度和主动能力由平台控制。不要用重发、假消息 ID 或未知结果重试冒充发送成功。上游升级可能覆盖补丁，必须重新审查并验证后部署。

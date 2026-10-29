@@ -19,3 +19,5 @@
 不要把 `qqbot.env`、`qzone-token`、`admin-password.txt` 或运行数据库复制进仓库。
 
 主动闲置/发送/评估间隔设为 0 不拦截；免打扰起止相同即关闭。表情包总闸门关闭时不执行单轮或每日限额。`search-config.json` 的 `maxResponseBytes=0` 不设置本地响应大小上限。
+
+QQ 专用 preset 内的 `@deepseek-ai/dsh-persona` 应设置 `complete: true`，由用户人格完整接管系统提示词，避免默认编程助手的身份和工作流混入日常聊天。工具权限与工具 schema 仍由运行时独立装配；工作区指令和渠道提醒继续经 pre-step 注入。
