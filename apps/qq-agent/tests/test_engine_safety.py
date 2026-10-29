@@ -148,6 +148,7 @@ async def test_midnight_budget_uses_send_time_not_enqueue_time(engine):
 
 @pytest.mark.asyncio
 async def test_cooldown_uses_send_time_not_old_enqueue_time(engine):
+    configure(engine.s, policy={'cooldown_hours':24})
     first = engine.enqueue('old-proactive', 'qq', '10001', 'proactive', {'segments': []})
     with engine.s.db() as c:
         c.execute('UPDATE ledger SET created=? WHERE id=?', (now()-3*86400, first))
@@ -308,3 +309,29 @@ async def test_qzone_public_context_excludes_all_private_history(engine):
     assert '[PUBLIC_INPUT]' in serialized
     for sentinel in ('[PRIVATE_MEMORY]', '[OTHER_PRIVATE_MEMORY]', '[PRIVATE_HISTORY]'):
         assert sentinel not in serialized
+
+
+@pytest.mark.asyncio
+async def test_unlimited_policy_does_not_block_after_old_daily_caps(engine):
+    for i in range(8):
+        ident=engine.enqueue('unlimited-'+str(i),'qq','10001','proactive',{'segments':[]})
+        assert (await engine.dispatch(ident))['status']=='success'
+    assert len(engine.channels.sent)==8
+
+
+@pytest.mark.asyncio
+async def test_autonomous_skip_does_not_consume_a_hidden_daily_slot(engine):
+    memory(engine.s)
+    engine.model=RecordingModel('<SKIP>')
+    await worker.autonomous(engine)
+    await worker.autonomous(engine)
+    assert len(engine.model.calls)==2
+
+
+def test_policy_zero_means_unlimited_and_large_optional_quotas_are_accepted():
+    from qqagent.config import Policy,Search
+    p=Policy()
+    for name in ('proactive_daily','comment_daily','publish_daily','like_daily','total_daily','model_daily','token_daily','cost_daily','cooldown_hours','retention_days','log_days'):
+        assert getattr(p,name)==0
+    assert Policy(proactive_daily=1000000,cost_daily=1000000).proactive_daily==1000000
+    assert Search(daily=1000000).daily==1000000

@@ -57,10 +57,10 @@ class Engine:
         if quiet and not row['test'] and (action!='reply' or not p.reply_in_quiet):return '安静时段'
         # updated 在发送占用和完成时刷新；入队日不能决定实际发送日额度。
         rows=s.rows("SELECT action,proactive,friend,updated FROM ledger WHERE updated>=? AND status IN ('sending','success','unknown')",(self.day(),))
-        if len(rows)>=p.total_daily:return '总发送日预算耗尽'
+        if p.total_daily>0 and len(rows)>=p.total_daily:return '总发送日预算耗尽'
         limit=p.proactive_daily if action=='proactive' else p.comment_daily if action in ('comment','reply_comment') else p.publish_daily if action=='publish' else p.like_daily if action=='like' else p.total_daily
         used=sum(1 for r in rows if (r['action'] in ('comment','reply_comment') if action in ('comment','reply_comment') else r['action']==action))
-        if used>=limit:return '动作日预算耗尽'
+        if limit>0 and used>=limit:return '动作日预算耗尽'
         if action=='proactive':
             previous=s.rows("SELECT updated FROM ledger WHERE friend=? AND action='proactive' AND status IN ('success','unknown','sending') ORDER BY updated DESC LIMIT 1",(row['friend'],))
             if previous and now()-previous[0]['updated']<p.cooldown_hours*3600:return '好友主动联系冷却中'

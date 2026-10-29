@@ -43,7 +43,7 @@ def prepare(raw,limit=6):
             frame+=1
         total=len(durations);duration=sum(durations)
         # Time-based coverage, including first and last frame. Do not assume FPS.
-        count=min(total,max(2,min(8,int(limit)))) if total>1 else 1
+        count=min(total,max(2,int(limit))) if total>1 else 1
         starts=[0]
         for value in durations:starts.append(starts[-1]+value)
         targets=[0] if count==1 else [round((duration-1)*i/(count-1)) for i in range(count)]

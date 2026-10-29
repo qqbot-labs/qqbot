@@ -300,7 +300,8 @@ def test_runner_keeps_logs_ephemeral_and_image_inputs_pinned():
     assert '--read-only' in runner and '--log-driver none' in runner
     assert '--tmpfs /runtime/napcat/logs:' in runner
     assert 'uid=19340,gid=19340,mode=0700' in runner
-    assert '--memory 1200m --memory-swap 1200m' in runner
+    assert '--memory ' not in runner and '--memory-swap ' not in runner
+    assert '--pids-limit ' not in runner
     assert '--init' in runner and '--ulimit core=0:0' in runner
     assert 'NapCat.Shell.4.6.7.zip' in dockerfile
     assert 'a4ac67ebe93c1ad2ccd43231e71c50021f20a673e9297a25a87ed45f8f8d20ea' in dockerfile

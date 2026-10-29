@@ -47,7 +47,7 @@ def search_save(body):
     if set(body)!={'enabled'} or type(body['enabled'])!=bool:raise d.Error('搜索开关格式无效')
     path=d.ROOT/'etc/search-config.json';folder=d.STATE/'search-revisions';folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     if path.exists():d.shutil.copyfile(path,folder/(d.stamp()+'.json'))
-    d.atomic(path,(json.dumps(body)+'\n').encode(),owner=(0,d.pwd.getpwnam('qqwhale').pw_gid));path.chmod(0o640)
+    d.atomic(path,(json.dumps({**json.loads(path.read_text()),**body})+'\n').encode(),owner=(0,d.pwd.getpwnam('qqwhale').pw_gid));path.chmod(0o640)
     d.audit('search.save');return {'message':'联网搜索设置已保存，立即生效。'}
 
 def search_test(body):

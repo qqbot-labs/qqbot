@@ -30,7 +30,7 @@ export default {
     '按时间倒序列出与当前对方的最近 N 条历史对话（含本条之前的内容）。' +
     '用于快速接上话、确认"上次聊到哪"。',
   inputSchema: {
-    limit: { type: 'number', description: '条数，默认 10，最多 50' },
+    limit: { type: 'number', description: '条数，默认 10，0 表示全部，不设本地最大条数' },
   },
   async run(args, env) {
     try {
@@ -39,10 +39,10 @@ export default {
       if (scope === 'group') return { ok: false, msg: '群聊不支持读取个人最近对话' };
       const { m, db } = await open();
       try {
-        const rows = m.recentMessages(db, { peer, limit: Number(args?.limit) || 10 });
+        const rows = m.recentMessages(db, { peer, limit: Number.isSafeInteger(args?.limit) ? args.limit : 10 });
         if (!rows.length) return { ok: true, msg: '记忆库里还没有这个人的历史记录。' };
         const lines = rows.map(
-          (r) => `- [${r.id}] ${m.fmtTime(r.ts)}${r.sender_name ? ` ${r.sender_name}:` : ''} ${m.clip(r.text, 140)}`,
+          (r) => `- [${r.id}] ${m.fmtTime(r.ts)}${r.sender_name ? ` ${r.sender_name}:` : ''} ${r.text}`,
         );
         return { ok: true, msg: `最近 ${rows.length} 条：\n${lines.join('\n')}` };
       } finally {

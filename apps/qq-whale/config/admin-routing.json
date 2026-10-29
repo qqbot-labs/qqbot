@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "cooldownSec": 300,
+  "cooldownSec": 0,
   "models": [
     "cn:glm-5.3-flash",
     "cn:glm-5v-turbo"

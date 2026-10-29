@@ -1,0 +1,37 @@
+name: Checks
+on:
+  pull_request:
+  push:
+    branches: [main, 'fix/**', 'feat/**']
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r apps/qq-agent/requirements.lock.txt pytest==8.4.2 pytest-asyncio==1.2.0 PyYAML==6.0.2
+      - run: python -m pytest -q apps/qq-agent/tests
+        env:
+          PYTHONPATH: apps/qq-agent
+      - run: python -m unittest discover -s apps/whale-admin/tests -v
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Unpack the pinned upstream plugin
+        run: |
+          mkdir -p "$RUNNER_TEMP/qqbot-plugin"
+          npm pack @zaofan/dsh-qqbot@1.10.9 --pack-destination "$RUNNER_TEMP/qqbot-plugin"
+          tar -xzf "$RUNNER_TEMP/qqbot-plugin/zaofan-dsh-qqbot-1.10.9.tgz" -C "$RUNNER_TEMP/qqbot-plugin"
+          python3 apps/qq-whale/bin/harden-plugin.py "$RUNNER_TEMP/qqbot-plugin/package"
+          python3 apps/qq-whale/bin/apply-chat-splitter.py "$RUNNER_TEMP/qqbot-plugin/package"
+          python3 apps/qq-whale/bin/harden-plugin.py "$RUNNER_TEMP/qqbot-plugin/package" --check
+          python3 apps/qq-whale/bin/apply-chat-splitter.py "$RUNNER_TEMP/qqbot-plugin/package" --check
+      - name: Test real outbound integration and memory
+        run: QQBOT_OUTBOUND="$RUNNER_TEMP/qqbot-plugin/package/dist/transport/outbound-buffer.js" node --test apps/qq-whale/tests/*.test.mjs
+      - run: node --experimental-strip-types --test apps/qq-agent/tests/qzone_http.test.mjs

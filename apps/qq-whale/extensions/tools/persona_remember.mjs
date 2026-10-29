@@ -25,29 +25,31 @@ function who(env) {
 export default {
   name: 'persona_remember',
   description:
-    '把用户明确说出的长期指令、称呼、偏好、禁忌或记忆要求写入人格偏好，后续每轮都会生效。' +
-    '只在用户明确说“记住/以后都/每次/不要/必须/叫我/称呼我/我的名字是”等长期要求时调用；' +
-    '不要保存一次性的情绪、临时任务、猜测或用户没有说过的内容。只保存原意，不得扩写。',
+    '持续保存主人明确表达的稳定偏好、个人事实、共同设定、称呼与关系约定，重启或换会话仍作为回复参考。' +
+    '不必等用户每次说“记住”；出现新的长期信息就保存，普通闲聊、临时情绪和猜测不记成事实。' +
+    '原意来自用户，不能把自己编的设定或对用户的猜测保存为真实事实。更正旧设定时用相同key或replace_id更新；扮演设定用setting，与现实fact分开。',
   inputSchema: {
-    text: { type: 'string', required: true, description: '用户明确表达的长期要求，最多300字' },
-    confirm: { type: 'boolean', description: '必须为 true 才写入' },
+    text: { type: 'string', required: true, description: '用户明确表达的长期要求，保留原意' },
+    kind: { type: 'string', description: 'preference偏好 / fact用户事实 / setting共同扮演设定 / relationship关系约定' },
+    key: { type: 'string', description: '稳定主题键，例如称呼、奶茶口味、工作作息；同一主题沿用原key以更正旧值，不另造一条冲突记录' },
+    replace_id: { type: 'string', description: '更正已有记录时传注入上下文里的p-编号；可省略' },
+    confirm: { type: 'boolean', description: '已授权的明确长期信息固定传true即可保存，无需再向用户确认' },
   },
   async run(args, env) {
     try {
       if (args?.confirm !== true) return { ok: false, msg: '需要确认：请传 confirm=true 再写入长期偏好' };
       const text = String(args?.text ?? '').trim();
       if (!text) return { ok: false, msg: 'text 不能为空' };
-      if (text.length > 300) return { ok: false, msg: '长期偏好最多 300 字，请精简后再写入' };
       const { scope, peer } = who(env);
       const owner = ownerPeer();
       if (scope !== 'c2c' || !owner || peer !== owner) return { ok: false, msg: '长期偏好只允许主人本人的私聊使用' };
       const core = await import(CORE_PATH);
-      const result = await core.add(PREFS_PATH, text, 'chat');
+      const result = await core.add(PREFS_PATH, text, 'chat', {kind:args.kind,key:args.key,replaceId:args.replace_id});
       return {
         ok: true,
         msg: result.duplicate
           ? `这条长期偏好已经存在，无需重复记录：${result.item.text}`
-          : `已写入长期人格偏好，后续对话会遵守：${result.item.text}`,
+          : `${result.updated?'已更正':'已保存'}长期设定，后续对话会参考：${result.item.text}`,
         id: result.item.id,
       };
     } catch (error) {

@@ -54,9 +54,27 @@ outboundTest('模型分出的两条短消息确实分开发送', async () => {
   assert.deepEqual(calls, ['今天这么忙啊。', '来，陪你歇会儿。']);
 });
 
-outboundTest('长回复按顺序发送 2~4 条独立消息', async () => {
+outboundTest('分条后仍保留段落，不把段落粘成逗号串', async () => {
+  const { calls } = await send('第一件事已经搞定了，终于能松口气。\n\n不过刚才那个笑话真的太离谱了，想起来又想笑。');
+  assert.equal(calls.length,2);
+  assert.ok(!calls[0].includes('不过'));
+  assert.ok(calls[1].startsWith('不过'));
+});
+
+outboundTest('关闭总闸门也关闭单轮表情包隐藏拦截', async () => {
+  const { pathToFileURL } = await import('node:url');
+  const gate = await import(new URL('../features/sticker-gate.js', pathToFileURL(modulePath)).href);
+  gate.getStickerGate(join(cwd,'stickers'));
+  gate.bindStickerGates(()=>({enabled:false,perTurnMax:1}));
+  assert.equal(gate.stickerPerTurnCtx(cwd).perTurnMax,0);
+  gate.bindStickerGates(()=>({enabled:true,perTurnMax:2}));
+  assert.equal(gate.stickerPerTurnCtx(cwd).perTurnMax,2);
+  gate.bindStickerGates(()=>({enabled:false,perTurnMax:0}));
+});
+
+outboundTest('长回复按顺序发送独立消息', async () => {
   const { calls, elapsed } = await send(longText);
-  assert.ok(calls.length >= 2 && calls.length <= 4, `实际 ${calls.length} 条`);
+  assert.ok(calls.length >= 2, `实际 ${calls.length} 条`);
   assert.equal(calls.map((part) => part.replace(/\s+/g, '')).join(''), longText.replace(/\s+/g, ''));
   assert.ok(elapsed >= (calls.length - 1) * 450, '消息之间应有发送间隔');
 });
@@ -67,7 +85,7 @@ outboundTest('自然段按语义分条', async () => {
     + '第三段讲时间，今晚先跑一次演练，明天再正式切换。演练要覆盖迁移、校验和回滚，不能只看迁移成功。\n\n'
     + '第四段是收尾，切换后保留回滚包，出问题十分钟内能恢复。恢复流程也要提前写好，别等出事再临时想办法。';
   const { calls } = await send(text);
-  assert.ok(calls.length >= 2 && calls.length <= 4);
+  assert.ok(calls.length >= 2);
   assert.equal(calls.map((part) => part.replace(/\s+/g, '')).join(''), text.replace(/\s+/g, ''));
 });
 

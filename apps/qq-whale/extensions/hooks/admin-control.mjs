@@ -7,7 +7,7 @@ const PACKAGE='/home/qqwhale/.dsh/profiles/web/node_modules/@zaofan/dsh-qqbot/di
 export const name='whale-admin-local-control';
 export function chooseNext(route,current,at=Date.now()) {
   if (!route?.enabled || !Array.isArray(route.models) || route.models.length<2) return null;
-  if (at-Number(route.lastSwitchAt||0)<Number(route.cooldownSec||300)*1000) return null;
+  if (at-Number(route.lastSwitchAt||0)<Number(route.cooldownSec??0)*1000) return null;
   const i=route.models.indexOf(current);return route.models[(i+1)%route.models.length];
 }
 export function providerFailure(event) {
@@ -34,7 +34,7 @@ export async function run(env) {
     if(!['c2c','group'].includes(scope)||!/^[a-fA-F0-9]{32}$/.test(peer)||!peers().some(p=>p.scope===scope&&p.peer===peer))throw Error('目标不是本机器人已授权或已连接的会话');
     const m=manager();if(!m)throw Error('QQ 连接尚未就绪');return m;
   };
-  const routeConfig=()=>{try{return JSON.parse(readFileSync(routeFile,'utf8'))}catch{return {enabled:false,models:[],cooldownSec:300}}};
+  const routeConfig=()=>{try{return JSON.parse(readFileSync(routeFile,'utf8'))}catch{return {enabled:false,models:[],cooldownSec:0}}};
   try { const history=readFileSync(routeLog,'utf8').trim().split('\n').slice(-30).map(x=>JSON.parse(x));lastSwitch=Math.max(0,...history.filter(x=>x.status==='switched').map(x=>x.ts)); } catch {}
   let chain=Promise.resolve();
   async function handle(x){
@@ -69,7 +69,7 @@ export async function run(env) {
       if(!r)r=await m.getOrCreate('c2c',policy.peer,policy.peer,{scope:'c2c',targetId:policy.peer});
       const busy=r.turnActive||r.agent.status==='running';
       if(x.method==='proactive.meta')return {sessionId:r.sessionId,busy:!!busy,lastInboundAt:r.lastInboundAt,model:m.getEffectiveModel('c2c',policy.peer)};
-      if(typeof x.text!=='string'||x.text.length>280||busy||typeof r.agent.inject!=='function')throw Error('无法记录主动消息上下文');
+      if(typeof x.text!=='string'||busy||typeof r.agent.inject!=='function')throw Error('无法记录主动消息上下文');
       const {createUserMessage}=await import('/home/qqwhale/whale/app/node_modules/@deepseek-ai/dsh-llm/lib/index.js');
       const deliveryId=String(x.messageId||'');
       if(deliveryId&&(r.agent.session.log||[]).some(e=>e.type==='user/message'&&e.data?.source?.kind==='whale-proactive-notice'&&e.data.source.deliveryId===deliveryId))return {recorded:true,persisted:true};

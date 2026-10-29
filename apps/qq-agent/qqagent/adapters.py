@@ -188,7 +188,7 @@ class ModelClient:
         old_cost=self.store.rows('SELECT count(*) n FROM usage WHERE created>=? AND cost IS NULL AND reserved_cost IS NULL',(start,))[0]['n']
         token_spend=(usage['budget_tokens'] or 0)+old_unknown*(model.context_limit+model.output_limit)
         cost_spend=(usage['budget_cost'] or 0)+old_cost*(model.context_limit*model.input_price+model.output_limit*model.output_price)/1000000
-        if usage['requests']>=cfg.policy.model_daily or token_spend>=cfg.policy.token_daily or cost_spend>=cfg.policy.cost_daily:raise Rejected('模型调用预算已用完')
+        if (cfg.policy.model_daily>0 and usage['requests']>=cfg.policy.model_daily) or (cfg.policy.token_daily>0 and token_spend>=cfg.policy.token_daily) or (cfg.policy.cost_daily>0 and cost_spend>=cfg.policy.cost_daily):raise Rejected('模型调用预算已用完')
         # Record reservation before network call; failures still consume one request.
         with self.store.db() as c:
             cur=c.execute('INSERT INTO usage(model,created,reserved_tokens,reserved_cost) VALUES(?,?,?,?)',(model.name,__import__('time').time(),model.context_limit+model.output_limit,(model.context_limit*model.input_price+model.output_limit*model.output_price)/1000000));usage_id=cur.lastrowid
@@ -238,7 +238,7 @@ class SearchClient:
         if not q:raise Rejected('搜索词为空')
         start=__import__('datetime').datetime.now(__import__('zoneinfo').ZoneInfo(cfg.policy.timezone)).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
         used=self.store.rows("SELECT count(*) n FROM logs WHERE action='search' AND result='ok' AND created>=?",(start,))[0]['n']
-        if used>=cfg.search.daily:raise Rejected('今日搜索预算已用完')
+        if cfg.search.daily>0 and used>=cfg.search.daily:raise Rejected('今日搜索预算已用完')
         try:
             async with httpx.AsyncClient(timeout=cfg.search.timeout,trust_env=False,follow_redirects=False) as c:
                 r=await c.post(cfg.search.base_url+'/search',json={'query':q,'max_results':cfg.search.max_results},headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
@@ -247,7 +247,7 @@ class SearchClient:
             data=r.json();results=data.get('results')
             if not isinstance(results,list):raise ValueError()
             out=[]
-            for item in results[:10]:
+            for item in results[:cfg.search.max_results]:
                 if not isinstance(item,dict):continue
                 title=str(item.get('title') or '').strip()[:300]
                 url=str(item.get('url') or '').strip()[:1000]

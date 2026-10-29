@@ -19,7 +19,7 @@ PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-MemoryMax=512M
+MemoryMax=infinity
 # NoNewPrivileges deliberately omitted: exact systemctl verbs are allowed by sudoers.
 [Install]
 WantedBy=multi-user.target

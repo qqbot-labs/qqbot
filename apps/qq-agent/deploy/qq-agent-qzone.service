@@ -27,7 +27,7 @@ PrivateTmp=true
 PrivateDevices=true
 BindPaths=/var/lib/qq-agent-dev/null:/dev/null
 ReadWritePaths=/var/lib/qq-agent-qzone
-MemoryMax=650M
+MemoryMax=infinity
 StandardOutput=null
 StandardError=null
 [Install]

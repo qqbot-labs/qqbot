@@ -45,7 +45,7 @@ BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
 
 Environment=HOME=/home/qqwhale
 Environment=WHALE_ROOT=/home/qqwhale/whale
-Environment=WHALE_DATA_MAX_MB=512
+Environment=WHALE_DATA_MAX_MB=0
 ExecStart=/home/qqwhale/whale/bin/whale-quota.sh
 ExecStopPost=/usr/sbin/logrotate --state /home/qqwhale/whale/logs/logrotate.state /home/qqwhale/whale/etc/logrotate.conf
 

@@ -32,7 +32,7 @@ export default {
     '返回带时间的原文片段。查不到就如实说没记录，不要编造。',
   inputSchema: {
     q: { type: 'string', required: true, description: '关键词或短语，中文可直接搜' },
-    limit: { type: 'number', description: '返回条数，默认 5，最多 20' },
+    limit: { type: 'number', description: '返回条数，默认 5，0 表示全部，不设本地最大条数' },
   },
   async run(args, env) {
     try {
@@ -43,10 +43,10 @@ export default {
       if (scope === 'group') return { ok: false, msg: '群聊不支持跨人检索长期记忆' };
       const { m, db } = await open();
       try {
-        const rows = m.searchMessages(db, { q, peer, limit: Number(args?.limit) || 5 });
+        const rows = m.searchMessages(db, { q, peer, limit: Number.isSafeInteger(args?.limit) ? args.limit : 5 });
         if (!rows.length) return { ok: true, msg: `没有找到与「${m.clip(q, 30)}」相关的历史记录。` };
         const lines = rows.map(
-          (r) => `- [${r.id}] ${m.fmtTime(r.ts)}${r.sender_name ? ` ${r.sender_name}:` : ''} ${m.clip(r.text, 160)}`,
+          (r) => `- [${r.id}] ${m.fmtTime(r.ts)}${r.sender_name ? ` ${r.sender_name}:` : ''} ${r.text}`,
         );
         return { ok: true, msg: `找到 ${rows.length} 条：\n${lines.join('\n')}` };
       } finally {

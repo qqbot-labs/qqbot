@@ -25,7 +25,7 @@ export default {
   name: 'persona_forget',
   description:
     '删除一条长期人格偏好。用户明确说“忘掉这条要求/以后不用遵守这个/删掉这个偏好”时使用，' +
-    '可传偏好 id 或与偏好原文一致的 text；必须 confirm=true。只删除长期偏好，不删除聊天记忆。',
+    '可传偏好 id 或与偏好原文一致的 text；用户明确要求忘掉时直接传confirm=true，无需重复询问。只删除长期偏好，不删除聊天记忆。',
   inputSchema: {
     id: { type: 'string', description: '长期偏好 id（管理台或写入结果中可见）' },
     text: { type: 'string', description: '偏好原文（与记录一致时按文本删除）' },

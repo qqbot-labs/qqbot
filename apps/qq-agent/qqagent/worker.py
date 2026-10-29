@@ -42,9 +42,9 @@ async def periodic(engine):
                     await autonomous(engine);detail='评估许可与待办；无候选时不调用模型'
                 elif name=='retention':
                     with s.db() as c:
-                        c.execute("DELETE FROM events WHERE channel='qq' AND created<?",(now()-cfg.policy.retention_days*86400,))
-                        c.execute("DELETE FROM events WHERE channel='qzone' AND created<?",(now()-cfg.qzone.retention_days*86400,))
-                        c.execute('DELETE FROM logs WHERE created<?',(now()-cfg.policy.log_days*86400,))
+                        if cfg.policy.retention_days>0:c.execute("DELETE FROM events WHERE channel='qq' AND created<?",(now()-cfg.policy.retention_days*86400,))
+                        if cfg.qzone.retention_days>0:c.execute("DELETE FROM events WHERE channel='qzone' AND created<?",(now()-cfg.qzone.retention_days*86400,))
+                        if cfg.policy.log_days>0:c.execute('DELETE FROM logs WHERE created<?',(now()-cfg.policy.log_days*86400,))
                     detail='已执行事件与日志保留策略；不清理发送账本去重锚点'
             except asyncio.CancelledError:raise
             except Exception:failure=1;detail='任务失败；已隔离，等待下个周期'
@@ -101,10 +101,8 @@ async def _autonomous(engine):
         if engine.gate(probe):continue
         memories=s.rows('SELECT body,source,label FROM memories WHERE friend=? AND kind=? ORDER BY id DESC LIMIT 10',(friend,'memory'))
         if not memories:continue
-        # One decision candidate per day, even when model skips.
-        key='decision:'+str(int(engine.day()))+':'+friend
-        if s.get(key):continue
-        s.set(key,True)
+        # Every scheduled evaluation is independent; no hidden once-per-day latch.
+        key='decision:'+str(time.time_ns())+':'+friend
         context=engine.context(True)
         try:
             text=await engine.model.complete([{'role':'system','content':s.active_persona()['body']+'\n仅根据有来源的本好友记忆，判断是否值得主动联系。可以不行动；无必要则输出 <SKIP>。不得编造经历。'},{'role':'user','content':js(memories)}])
@@ -116,9 +114,8 @@ async def _autonomous(engine):
     if cfg.qzone.enabled and cfg.qzone.publish:
         public=s.rows("SELECT body,source,label FROM memories WHERE friend='' AND kind='growth' AND label='fact' ORDER BY id DESC LIMIT 10")
         probe={'channel':'qzone','friend':'','action':'publish','proactive':1,'test':0}
-        key='publish-decision:'+str(int(engine.day()))
-        if public and not engine.gate(probe) and not s.get(key):
-            s.set(key,True)
+        key='publish-decision:'+str(time.time_ns())
+        if public and not engine.gate(probe):
             context=engine.context(True)
             try:
                 text=await engine.model.complete([{'role':'system','content':s.active_persona()['body']+'\n仅根据主人明确标为公开的成长素材决定是否发布说说，不引用私聊，不编造经历；不发布则输出 <SKIP>。'},{'role':'user','content':js(public)}])

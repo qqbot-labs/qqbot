@@ -31,11 +31,11 @@ REASONING_EFFORTS = ('low', 'medium', 'high', 'max')
 class Model(Strict):
     base_url: str = ''
     name: str = ''
-    timeout: int = Field(30,ge=3,le=120)
-    context_limit: int = Field(12000,ge=1000,le=128000)
-    output_limit: int = Field(1000,ge=16,le=8000)
-    input_price: float = Field(0.0,ge=0,le=10000)
-    output_price: float = Field(0.0,ge=0,le=10000)
+    timeout: int = Field(30,ge=3)
+    context_limit: int = Field(12000,ge=1000)
+    output_limit: int = Field(1000,ge=16)
+    input_price: float = Field(0.0,ge=0)
+    output_price: float = Field(0.0,ge=0)
     # 留空表示不向供应商发送该参数；默认 low 更快、推理 token 更少。
     reasoning_effort: str = 'low'
     @field_validator('reasoning_effort')
@@ -54,9 +54,9 @@ class Model(Strict):
 
 class Search(Strict):
     base_url: str = 'https://api.example.com/v1'  # override with the provider of your choice
-    timeout: int = Field(20,ge=3,le=60)
-    max_results: int = Field(5,ge=1,le=10)
-    daily: int = Field(50,ge=0,le=1000)
+    timeout: int = Field(20,ge=3)
+    max_results: int = Field(5,ge=1)
+    daily: int = Field(0,ge=0)
     @field_validator('base_url')
     @classmethod
     def base(cls,v):
@@ -74,23 +74,23 @@ class Permissions(Strict):
 
 class Policy(Strict):
     timezone: str = 'Asia/Shanghai'
-    quiet_start: int = Field(23,ge=0,le=23)
-    quiet_end: int = Field(9,ge=0,le=23)
+    quiet_start: int = Field(0,ge=0,le=23)
+    quiet_end: int = Field(0,ge=0,le=23)
     reply_in_quiet: bool = True
     enabled: bool = False
     growth: bool = False
-    proactive_daily: int = Field(2,ge=0,le=20)
-    comment_daily: int = Field(3,ge=0,le=30)
-    publish_daily: int = Field(1,ge=0,le=10)
-    like_daily: int = Field(5,ge=0,le=50)
-    total_daily: int = Field(100,ge=0,le=1000)
-    model_daily: int = Field(100,ge=0,le=2000)
-    token_daily: int = Field(100000,ge=0,le=10000000)
-    cost_daily: float = Field(5.0,ge=0,le=1000)
-    cooldown_hours: int = Field(24,ge=1,le=720)
-    decision_minutes: int = Field(30,ge=5,le=1440)
-    retention_days: int = Field(30,ge=1,le=3650)
-    log_days: int = Field(14,ge=1,le=365)
+    proactive_daily: int = Field(0,ge=0)
+    comment_daily: int = Field(0,ge=0)
+    publish_daily: int = Field(0,ge=0)
+    like_daily: int = Field(0,ge=0)
+    total_daily: int = Field(0,ge=0)
+    model_daily: int = Field(0,ge=0)
+    token_daily: int = Field(0,ge=0)
+    cost_daily: float = Field(0,ge=0)
+    cooldown_hours: int = Field(0,ge=0)
+    decision_minutes: int = Field(5,ge=1)
+    retention_days: int = Field(0,ge=0)
+    log_days: int = Field(0,ge=0)
     defaults: Permissions = Field(default_factory=Permissions)
     @field_validator('timezone')
     @classmethod
@@ -108,10 +108,10 @@ class Qzone(Strict):
     comment: bool = False
     reply: bool = False
     publish: bool = False
-    poll_minutes: int = Field(10,ge=2,le=1440)
-    pages: int = Field(1,ge=1,le=5)
-    candidates: int = Field(5,ge=1,le=30)
-    retention_days: int = Field(7,ge=1,le=365)
+    poll_minutes: int = Field(10,ge=2)
+    pages: int = Field(1,ge=1)
+    candidates: int = Field(5,ge=1)
+    retention_days: int = Field(0,ge=0)
     _urls = field_validator('http_url','ws_url')(Channel.urls.__func__)
 
 class Tools(Strict):

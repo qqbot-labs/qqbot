@@ -12,13 +12,13 @@ export async function preprocess(ctx,dependencies){
  const images=(Array.isArray(message.attachments)?message.attachments:[]).filter(a=>{
   const type=String(a?.content_type||a?.contentType||'').toLowerCase();
   return typeof a?.url==='string'&&(!type||type==='image'||type==='application/octet-stream'||type.startsWith('image/'));
- }).slice(0,config.maxImages);
+ }).slice(0,config.maxImages||undefined);
  if(!images.length)return;
- const original=String(message.content||'');const notes=[];const overallDeadline=Date.now()+75000;
+ const original=String(message.content||'');const notes=[];const overallDeadline=Date.now()+images.length*(config.timeoutMs+20000);
  for(const [index,image] of images.entries()){
   try{
    if(Date.now()>overallDeadline-2000)throw Error('本条消息视觉处理已达到时间预算');
-   let path=lookup(image.url);const deadline=Math.min(Date.now()+10000,overallDeadline);
+   let path=lookup(image.url);const deadline=overallDeadline;
    while(!path&&Date.now()<deadline){await wait(120);path=lookup(image.url)}
    if(!path){if(String(image.content_type||image.contentType||'').startsWith('image'))throw Error('QQ 图片尚未成功落盘，未能识别');continue}
    const result=await analyze(path,{kind:'inbound',deadline:overallDeadline});

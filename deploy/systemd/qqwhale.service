@@ -152,12 +152,12 @@ ReadOnlyPaths=/home/qqwhale/whale/app /home/qqwhale/whale/etc /home/qqwhale/whal
 MemoryDenyWriteExecute=no
 
 # --- 资源限制（按 VPS 余量调整）---------------------------------------------
-# 这台 VPS 还有别的生产服务，因此给机器人明确的天花板：
-MemoryMax=768M
-MemoryHigh=640M
-CPUQuota=60%
-TasksMax=256
-LimitNOFILE=8192
+# 不设置本项目的人为资源天花板，实际资源由宿主机分配：
+MemoryMax=infinity
+MemoryHigh=infinity
+CPUQuota=
+TasksMax=infinity
+LimitNOFILE=infinity
 
 # --- 日志落盘 ---------------------------------------------------------------
 StandardOutput=append:/home/qqwhale/whale/logs/dsh.log

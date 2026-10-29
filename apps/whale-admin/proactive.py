@@ -2,11 +2,11 @@
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import fcntl,hashlib,json,os,re,stat,subprocess,time,urllib.request,urllib.error,sys
+import fcntl,hashlib,json,os,re,stat,shutil,subprocess,time,urllib.request,urllib.error,sys
 ROOT=Path(os.environ.get('WHALE_ROOT','/home/qqwhale/whale'))
 POLICY=ROOT/'etc/proactive.json';DATA=ROOT/'data/qqwhale';STATE=DATA/'proactive-state.json';EVENTS=DATA/'proactive-events.jsonl'
 TZ=ZoneInfo('Asia/Shanghai')
-DEFAULT={'enabled':False,'appId':'','peer':'','idleMinutes':180,'intervalMinutes':90,'quietStart':'23:00','quietEnd':'09:00','mode':'ai','text':'想起你啦，过来打个招呼。忙的话不用急着回我。'}
+DEFAULT={'enabled':False,'appId':'','peer':'','idleMinutes':0,'intervalMinutes':0,'decisionIntervalMinutes':0,'quietStart':'00:00','quietEnd':'00:00','mode':'ai','text':'想起你啦，过来打个招呼。忙的话不用急着回我。'}
 
 def config():
  raw=json.loads(POLICY.read_text()) if POLICY.exists() else {}
@@ -82,7 +82,7 @@ def habit_summary(stats,last,s):
  return f"近30天用户发来{stats['total']}条消息，活跃{stats['days']}天，近7天{stats['recent7']}条；高峰{top}；当前{stats['currentHour']:02d}时前后1小时{stats['currentWindow']}条，近30天同一星期同时段{stats['sameWeekdayWindow']}条；上次用户消息{lasttxt}，上次主动消息{senttxt}。"
 
 def due(c,s,last,now=None,manual=False):
- now=now or time.time();dt=datetime.fromtimestamp(now,TZ);date=dt.strftime('%Y-%m-%d')
+ now=time.time() if now is None else now;dt=datetime.fromtimestamp(now,TZ);date=dt.strftime('%Y-%m-%d')
  if not manual and not c['enabled']:return '已暂停'
  if not re.fullmatch(r'[a-fA-F0-9]{32}',c['peer']):return '尚未选择私聊对象'
  if not last:return '尚无该对象的真实入站消息'
@@ -90,10 +90,9 @@ def due(c,s,last,now=None,manual=False):
  if not manual and start!=end and (start<=hh<end if start<end else hh>=start or hh<end):return '免打扰时段'
  key=c['appId']+':'+c['peer'];s=s if s.get('target')==key else {}
  status=s.get('status');last_attempt=float(s.get('lastAttempt') or 0);last_sent=float(s.get('lastSent') or 0)
- if status in ('sending','preparing') and now-last_attempt<600:return '上一条主动消息仍在处理'
- if status=='unknown' and now-last_attempt<6*3600:return '上次发送结果不确定，暂缓自动重发'
+ # flock and the live busy probe own concurrency; stale status is not a timed quota.
  if not manual and last_sent and now-last_sent<c['intervalMinutes']*60:return '距离上次主动消息太近，等待下一次判断'
- if not manual and s.get('lastDecision') and now-float(s['lastDecision'])<1800:return '刚评估过一次，30分钟内不重复判断'
+ if not manual and s.get('lastDecision') and now-float(s['lastDecision'])<c['decisionIntervalMinutes']*60:return '尚未到配置的评估间隔'
  if not manual and now-last<c['idleMinutes']*60:return '最近仍有互动'
  return None
 
@@ -119,15 +118,14 @@ def bridge(method,**args):
  return v['data']
 
 def normalize_chat_text(text):
- text=str(text or '').replace('\r\n','\n').replace('\r','\n').strip()
- if not text:return text
- if '```' in text or re.search(r'^\s*(?:[-*+]|\d+[.)])\s+',text,re.M) or re.search(r'^\s*\|.*\|\s*$',text,re.M) or re.search(r'^\s*#{1,6}\s+',text,re.M):return text
- if len(text)>600:return text
- text=re.sub(r'[ \t]*\n+[ \t]*','，',text)
- text=re.sub(r'，{2,}','，',text)
- text=re.sub(r'([，。！？；：…~～])，',r'\1',text)
- text=re.sub(r'，([，。！？；：…])',r'\1',text)
- return text.strip('，')
+ # Preserve the model's paragraph boundaries, including very short replies.
+ return str(text or '').replace('\r\n','\n').replace('\r','\n').strip()
+
+def format_chat(text):
+ raw=subprocess.check_output([shutil.which('node') or '/usr/bin/node',str(ROOT/'bin/chat-format.mjs')],input=json.dumps({'text':text}),text=True,timeout=10,env={**os.environ,'WHALE_ROOT':str(ROOT)})
+ result=json.loads(raw)
+ if not result.get('messages') or not all(isinstance(x,str) and x.strip() for x in result['messages']):raise RuntimeError('主动消息正文为空')
+ return result
 
 def _persona_context():
  import yaml
@@ -144,26 +142,32 @@ def _persona_context():
  if sid:
   raw=subprocess.check_output(['/usr/bin/node','/opt/whale-admin/read-events.mjs','messages',sid],timeout=20,text=True)
   recent=[{'role':x['role'],'content':x['text'][:800]} for x in json.loads(raw).get('messages',[])[-8:] if x['text'].strip()]
- instructions=(ROOT/'workspace/AGENTS.md').read_text()[:12000]
+ instructions=(ROOT/'workspace/AGENTS.md').read_text()
+ profile_path=ROOT/'data/qqwhale/persona-preferences.json'
+ if profile_path.exists():
+  profile=json.loads(profile_path.read_text())
+  active=[{'id':x.get('id'),'kind':x.get('kind','preference'),'key':x.get('key',''),'text':x['text']} for x in profile.get('items',[]) if x.get('text')]
+  instructions+='\n【当前长期熟悉档案，最新值优先】\n'+json.dumps(active,ensure_ascii=False)
+  instructions+='\n【已撤销主题，不从旧聊天恢复】'+json.dumps([x['key'] for x in profile.get('revoked',[]) if x.get('key')],ensure_ascii=False)
  return e,persona,model,recent,instructions
 
 def generate_ai(c):
  if c['mode']=='fixed':return c['text'],{'kind':'fixed'}
  e,persona,model,recent,instructions=_persona_context()
- prompt='这是后台主动关心任务，不是用户新发言。请延续人格、结合下方近期对话，主动发一句轻松自然的关心或分享。中文1至3个短句，通常20至70字，不超过120字，不反复追问、不制造焦虑、不声称观察到现实情况、不要求用户立即回复、不提后台或定时任务、不输出链接/工具标记。只输出要发送的正文。\n北京时间：'+datetime.now(TZ).strftime('%Y-%m-%d %H:%M')+'\n近期对话仅供背景：'+json.dumps(recent,ensure_ascii=False)
+ prompt='这是后台主动关心任务，不是用户新发言。请延续人格、结合下方近期对话，主动发一句轻松自然的关心或分享。像熟悉的QQ朋友随口接话，一句够了就停；两个独立意思用空行分开。不凑字数，不反复追问、不制造焦虑、不声称观察到现实情况、不要求用户立即回复、不提后台或定时任务、不输出工具控制标记。只输出要发送的正文。\n北京时间：'+datetime.now(TZ).strftime('%Y-%m-%d %H:%M')+'\n近期对话仅供背景：'+json.dumps(recent,ensure_ascii=False)
  api_base=(e.get('WHALE_API_BASE') or 'https://api.example.com/v1').rstrip('/')
  start=time.time();out=post(api_base+'/chat/completions',{'model':model,'messages':[{'role':'system','content':persona+'\n\n'+instructions},{'role':'user','content':prompt}],'max_tokens':4096,'stream':False,'thinking':{'type':'disabled'},'reasoning_effort':'low'},{'Authorization':'Bearer '+e['WHALE_API_KEY']},timeout=60)
  text=out.get('choices',[{}])[0].get('message',{}).get('content','')
  if not isinstance(text,str) or not text.strip():raise RuntimeError('模型未返回正文')
  text=normalize_chat_text(text).strip()
- if len(text)>280 or re.search(r'\[MEDIA:|\[RECALL\]|https?://',text):raise RuntimeError('主动消息内容超限或含不允许的控制标记/链接')
+ if re.search(r'\[MEDIA:|\[RECALL\]',text):raise RuntimeError('主动消息包含未解析的控制标记')
  return text,{'kind':'ai','model':model,'backend':out.get('model'),'durationMs':round((time.time()-start)*1000),'usage':out.get('usage',{})}
 
 def decide_and_generate(c,s,last):
  if c['mode']=='fixed':return True,c['text'],{'kind':'fixed'},'固定文案'
  e,persona,model,recent,instructions=_persona_context()
  stats=habit_stats(c['peer']);habits=habit_summary(stats,last,s)
- prompt='这是后台主动关心调度，不是用户新发言。请结合当前北京时间、用户过去30天的主动聊天习惯、近期对话、上次主动消息后的反馈，判断此刻是否适合主动发一条QQ消息。原则：不要打扰正在忙、刚聊过、明显休息或没有聊天习惯的时段；不要为了打卡而发；如果适合，延续人格写1至3个自然短句，通常20至70字，不劝睡、不说教、不制造焦虑、不要求立即回复、不声称观察到现实、不提后台或定时任务。\n只输出严格JSON，不要markdown：{"send":true或false,"reason":"一句内部判断理由","text":"适合时发送的正文，不适合时为空字符串"}。\n当前：'+datetime.now(TZ).strftime('%Y-%m-%d %H:%M %A')+'\n习惯摘要：'+habits+'\n近期对话仅供背景：'+json.dumps(recent,ensure_ascii=False)
+ prompt='这是后台主动关心调度，不是用户新发言。请结合当前北京时间、用户过去30天的主动聊天习惯、近期对话、上次主动消息后的反馈，判断此刻是否适合主动发一条QQ消息。不存在每日次数、夜间或静默天数限制；根据近期对话和具体话题判断有没有自然想说的话，不按打卡凑消息，不仅凭沉默就假定对方不想聊。如果适合，延续人格随口说一句，两个独立意思用空行分开，不凑字数，不劝睡、不说教、不制造焦虑、不要求立即回复、不声称观察到现实、不提后台或定时任务。\n只输出严格JSON，不要markdown：{"send":true或false,"reason":"一句内部判断理由","text":"适合时发送的正文，不适合时为空字符串"}。\n当前：'+datetime.now(TZ).strftime('%Y-%m-%d %H:%M %A')+'\n习惯摘要：'+habits+'\n上次主动消息（勿重复发送）：'+str(s.get('lastText') or '')+'\n近期对话仅供背景：'+json.dumps(recent,ensure_ascii=False)
  api_base=(e.get('WHALE_API_BASE') or 'https://api.example.com/v1').rstrip('/')
  start=time.time();out=post(api_base+'/chat/completions',{'model':model,'messages':[{'role':'system','content':persona+'\n\n'+instructions},{'role':'user','content':prompt}],'max_tokens':800,'stream':False,'thinking':{'type':'disabled'},'reasoning_effort':'low'},{'Authorization':'Bearer '+e['WHALE_API_KEY']},timeout=60)
  raw=out.get('choices',[{}])[0].get('message',{}).get('content','')
@@ -180,13 +184,11 @@ def decide_and_generate(c,s,last):
  if not obj['send']:return False,'',usage,reason or '判断此时不适合打扰'
  text=normalize_chat_text(obj.get('text') or '').strip()
  if not text:raise RuntimeError('判断为发送但正文为空')
- if len(text)>200 or re.search(r'\[MEDIA:|\[RECALL\]|https?://',text):raise RuntimeError('主动消息内容超限或含不允许的控制标记/链接')
+ if re.search(r'\[MEDIA:|\[RECALL\]',text):raise RuntimeError('主动消息包含未解析的控制标记')
  return True,text,usage,reason or '适合主动问候'
 
 def generate(c):
- try:return generate_ai(c)
- except Exception as error:
-  return c['text'],{'kind':'fixed-fallback','reason':re.sub(r'sk-[A-Za-z0-9_-]+','[隐藏]',str(error))[:160]}
+ return generate_ai(c)
 
 def tick(manual=False,preview=False):
  DATA.mkdir(parents=True,exist_ok=True);fd=os.open(DATA/'.proactive.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
@@ -218,7 +220,9 @@ def tick(manual=False,preview=False):
     s.update(target=key,day=day,lastDecision=now,lastDecisionReason=why,status='deferred');atomic(STATE,s)
     record({'status':'deferred','appId':c['appId'],'peer':c['peer'],'reason':why,'manual':False})
     return {'status':'skipped','reason':'主动判断暂不发送：'+why}
-  s.update(target=key,day=day,attempts=(s.get('attempts',0) if s.get('day')==day else 0)+1,lastAttempt=now,lastDecision=now,lastDecisionReason=why,status='preparing')
+  if not manual and s.get('status')=='unknown' and text==s.get('lastPlannedText') and last<=float(s.get('attemptInboundAt') or 0):
+   return {'status':'skipped','reason':'上一条相同消息结果未知，不自动重发原文'}
+  s.update(lastPlannedText=text,attemptInboundAt=last,target=key,day=day,attempts=(s.get('attempts',0) if s.get('day')==day else 0)+1,lastAttempt=now,lastDecision=now,lastDecisionReason=why,status='preparing')
   # Commit attempt before network; crash/timeout never produces automatic resend.
   atomic(STATE,s)
   try:
@@ -229,15 +233,26 @@ def tick(manual=False,preview=False):
    if envvalues().get('QQBOT_APPID')!=c['appId']:raise RuntimeError('生成期间机器人账号已切换，取消发送')
    token=post('https://api.bot.qq.com/app/getAppAccessToken',{'appId':e['QQBOT_APPID'],'clientSecret':e['QQBOT_SECRET']},timeout=20).get('access_token')
    if not token:raise RuntimeError('QQ平台认证失败')
-   s['status']='sending';atomic(STATE,s)
-   out=post('https://api.bot.qq.com/v2/users/'+c['peer']+'/messages',{'msg_type':0,'content':text,'msg_seq':int(now*1000)%2147483647},{'Authorization':'QQBot '+token,'X-Union-Appid':e['QQBOT_APPID']},timeout=20)
-   if not out.get('id'):raise RuntimeError('QQ未返回消息ID，状态不确定')
+   formatted=format_chat(text);message_ids=[];sent_parts=[];context_recorded=True
+   s.update(status='preparing',messageIds=[],sentParts=0,totalParts=len(formatted['messages']));atomic(STATE,s)
+   for index,part in enumerate(formatted['messages']):
+    if index:
+     time.sleep(formatted['delays'][index-1]/1000)
+    if config()!=c or last_inbound(c['peer'])>last or bridge('proactive.meta').get('busy'):
+     s.update(status='interrupted',lastSent=time.time(),lastText='\n\n'.join(sent_parts));atomic(STATE,s)
+     record({'status':'interrupted','sentParts':len(sent_parts),'totalParts':len(formatted['messages'])})
+     return {'status':'interrupted','sentParts':len(sent_parts),'message':'分条发送期间收到新消息或配置变化，剩余内容未发送。'}
+    s['status']='sending';atomic(STATE,s)
+    out=post('https://api.bot.qq.com/v2/users/'+c['peer']+'/messages',{'msg_type':0,'content':part,'msg_seq':(int(now*1000)+index)%2147483647},{'Authorization':'QQBot '+token,'X-Union-Appid':e['QQBOT_APPID']},timeout=20)
+    if not out.get('id'):raise RuntimeError('QQ未返回消息ID，状态不确定')
+    message_ids.append(out['id']);sent_parts.append(part)
+    try:bridge('proactive.context',text=part,messageId=out['id'])
+    except Exception:context_recorded=False
+    s.update(status='preparing',messageIds=message_ids,sentParts=len(message_ids),lastSent=time.time(),lastText='\n\n'.join(sent_parts));atomic(STATE,s)
    s.update(status='sent',lastSent=time.time(),messageId=out['id'],lastText=text,lastDecisionReason='已发送');atomic(STATE,s)
-   note=True
-   try:bridge('proactive.context',text=text,messageId=out['id'])
-   except Exception:note=False
+   note=context_recorded
    record({'status':'sent','appId':c['appId'],'peer':c['peer'],'text':text,'contextRecorded':note,'generation':usage,'manual':manual})
-   return {'status':'sent','text':text,'contextRecorded':note,'generation':usage,'message':'QQ平台已接受主动消息。'}
+   return {'status':'sent','text':text,'contextRecorded':note,'generation':usage,'sentParts':len(message_ids),'message':'QQ平台已接受主动消息。'}
   except Exception as error:
    uncertain=s.get('status')=='sending' and not str(error).startswith('接口拒绝')
    s.update(status='unknown' if uncertain else 'failed',error=re.sub(r'sk-[A-Za-z0-9_-]+','[隐藏]',str(error))[:180]);atomic(STATE,s);record({'status':s['status'],'error':s['error'],'manual':manual})
@@ -262,12 +277,12 @@ def save(body):
  allowed=set(DEFAULT)-{'appId'};v=body['config']
  if set(v)!=allowed:raise d.Error('主动关心设置包含未知或缺失字段')
  if type(v['enabled'])!=bool:raise d.Error('开关格式无效')
- for k,lo,hi in [('idleMinutes',15,10080),('intervalMinutes',30,10080)]:
-  if type(v[k])!=int or not lo<=v[k]<=hi:raise d.Error('数值超出范围：'+k)
+ for k,lo,hi in [('idleMinutes',0,None),('intervalMinutes',0,None),('decisionIntervalMinutes',0,None)]:
+  if type(v[k])!=int or v[k]<lo:raise d.Error('数值超出范围：'+k)
  for k in ['quietStart','quietEnd']:
   if not isinstance(v[k],str) or not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]',v[k]):raise d.Error('免打扰时间应为HH:MM')
- if v['mode'] not in ['ai','fixed'] or not isinstance(v['text'],str) or not 1<=len(v['text'].strip())<=280 or '\x00' in v['text']:raise d.Error('主动消息文案格式无效')
- if re.search(r'\[MEDIA:|\[RECALL\]|https?://',v['text']):raise d.Error('主动文案不能含控制标记或链接')
+ if v['mode'] not in ['ai','fixed'] or not isinstance(v['text'],str) or not v['text'].strip() or '\x00' in v['text']:raise d.Error('主动消息文案格式无效')
+ if re.search(r'\[MEDIA:|\[RECALL\]',v['text']):raise d.Error('主动文案不能含未解析的控制标记')
  current=get()
  if body['revision']!=current['revision']:raise d.Error('设置已被修改，请刷新后保存')
  peer=v['peer'];old=current['config']

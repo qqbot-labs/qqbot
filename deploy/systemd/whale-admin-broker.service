@@ -33,7 +33,7 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 LockPersonality=yes
 RestrictSUIDSGID=yes
-MemoryMax=384M
-CPUQuota=40%
+MemoryMax=infinity
+CPUQuota=
 [Install]
 WantedBy=multi-user.target

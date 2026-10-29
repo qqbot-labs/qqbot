@@ -1,39 +1,27 @@
-# dsh-qqbot 本地补丁
+# dsh-qqbot 聊天补丁
 
-`chat-splitter.js` 用于 QQ Whale 的普通聊天出站路径。v3 保留模型主动分出的短消息，即使合计不到 40 字也分开发送；未分段的多句回复从 40 字起按完整句子分条，目标每条约 28 字，最多 4 条（300 字以上最多 5 条）。
+v4 保留模型写出的独立短消息，按完整句子处理较长聊天，并可在超长逗号串的语义转折处分条。链接、行内代码、引号和括号内部不切，代码块、列表和表格保留结构。不截断正文，不设置默认本地消息条数上限。
 
-字数是分组目标，不是截断上限。单个长句不在逗号处硬切，代码块、表格、列表和引用保持完整，链接与行内代码不截断。生成端的短句要求在 `workspace/AGENTS.md`：日常默认 1~2 个短句、通常共 10~40 字；用户要求详细解释时保留必要信息。
+`chat-delivery.json` 的全部参数在管理台“QQ 与安全 → 聊天分条与节奏”可调整：`shortLimit`、`targetChars`、`longSentenceChars`、`minMessageChars`、`maxMessages`、`messageDelayMs`、`typingMsPerChar`。字数用于分组；`maxMessages=0` 不限条数，`longSentenceChars=0` 关闭逗号串兜底。示例见 `config/chat-delivery.example.json`。
 
-## 验证
+普通 QQ 回复和主动关心使用同一份分条实现与配置。不会把换行重新替换成逗号。自然消息使用配置的停顿；传输层硬分块保留短间隔，不按几千字模拟打字。`normalizeChat=false` 保留非聊天文本原样。
 
-仓库内纯函数测试不依赖服务器或已安装插件：
+## 安装与验证
 
-```bash
-node --test apps/qq-whale/tests/chat-splitter.test.mjs
+只支持已审查的 `@zaofan/dsh-qqbot@1.10.9` 原始包及摘要锁定的线上 v3 变体。安装器验证所有接入点，保存原文件，支持重复安装与完整性检查；未知本地修改会在写入前失败。
+
+```sh
+python3 apps/qq-whale/bin/harden-plugin.py /path/to/plugin
+python3 apps/qq-whale/bin/apply-chat-splitter.py /path/to/plugin
+python3 apps/qq-whale/bin/harden-plugin.py /path/to/plugin --check
+python3 apps/qq-whale/bin/apply-chat-splitter.py /path/to/plugin --check
+QQBOT_OUTBOUND=/path/to/plugin/dist/transport/outbound-buffer.js \
+  node --test apps/qq-whale/tests/*.test.mjs
+python3 -m unittest discover -s apps/whale-admin/tests -v
 ```
 
-发送集成测试需要真实的 `@zaofan/dsh-qqbot@1.10.9`。在独立目录解包 npm 包后，执行：
+集成测试调用真实插件的发送函数，QQ 客户端使用夹具，不发真实消息；不提供 `QQBOT_OUTBOUND` 时发送测试明确跳过。CI 会解包固定 npm 版本并实际运行发送集成测试。生产使用非流式发送，并在 `ExecStartPre` 同时检查权限补丁和分条补丁。
 
-```bash
-python3 apps/qq-whale/bin/apply-chat-splitter.py /path/to/unpacked/package
-python3 apps/qq-whale/bin/apply-chat-splitter.py /path/to/unpacked/package --check
-QQBOT_OUTBOUND=/path/to/unpacked/package/dist/transport/outbound-buffer.js \
-  node --test apps/qq-whale/tests/send-outbound.test.mjs
-```
+部署还需同步 `bin/chat-format.mjs`、`patches/dsh-qqbot/`、工作区指令及私有 profile 内的格式规则。QQ 专用 persona 需使用 `complete: true`，避免默认编程助手提示词混入。人格、每轮注入、长期偏好不能再包含“禁止空行分条”或强制凑字数的旧要求。私人人格不复制进公开仓库。
 
-集成测试使用模拟 QQ 客户端和临时数据目录，不会发真实消息。不设置 `QQBOT_OUTBOUND` 时明确跳过集成测试；`QQBOT_SPLITTER` 可用于验证已安装的分段器。
-
-## 安装与生效
-
-`apply-chat-splitter.py` 校验固定版本及原始 `outbound-buffer.js` 的 SHA-256，备份原文件，然后安装分段器并接入现有发送循环。保留原有引用、目标解析、发送计数回调和 500ms 间隔；`normalizeChat=false` 可跳过聊天分条。重复安装及 `--check` 可核对完整性。
-
-发现上游版本变化或未知本地修改时，脚本在写入前失败；已有线上补丁需先对照合并，不会直接覆盖。服务需使用非流式发送才能经过此分条路径。
-
-部署时还需将本次 `workspace/AGENTS.md` 的聊天规则合入服务器现有工作区指令，保留私有人格和长期偏好。只修改 GitHub 源码不会自动更新线上指令或安装目录。
-
-它不是上游包的一部分。插件升级或重装会覆盖安装目录里的补丁，升级前需要：
-
-1. 对照上游版本重新审查补丁；
-2. 运行纯函数测试与上述发送集成测试；
-3. 确认 `outbound-buffer.js` 的接入点仍存在；
-4. 通过 PR 审查后再部署。
+QQ 平台的被动回复窗口、每条入站的回复额度和主动能力由平台控制。不要用重发、假消息 ID 或未知结果重试冒充发送成功。上游升级可能覆盖补丁，必须重新审查并验证后部署。

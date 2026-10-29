@@ -201,3 +201,14 @@ def test_catalog_efforts_are_consistent():
         assert set(item['efforts']) <= set(REASONING_EFFORTS)
         assert item['default_effort'] in item['efforts']
         assert item['max_output'] > 0 and item['context'] >= 1000
+
+
+@pytest.mark.asyncio
+async def test_zero_model_budgets_do_not_reject_a_real_adapter_call(tmp_path):
+    s=configured(tmp_path,base_url='https://api.example.test/v1',name='test')
+    cfg=s.get('config');cfg['policy'].update(model_daily=0,token_daily=0,cost_daily=0)
+    s.save_config(cfg,s.get('revision'))
+    def handler(request):
+        return httpx.Response(200,json={'choices':[{'message':{'content':'OK'}}],'usage':{'prompt_tokens':10,'completion_tokens':2}})
+    with patched(handler):
+        assert await ModelClient(s).complete([{'role':'user','content':'x'}])=='OK'
