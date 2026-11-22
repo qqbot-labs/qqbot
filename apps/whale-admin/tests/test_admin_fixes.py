@@ -143,11 +143,17 @@ class AdminFixesTests(unittest.TestCase):
         self.assertEqual(d.pending_status()['known'], False)
         self.assertEqual(d.prefs_view()['items'], [])
         self.assertEqual(d.backups_list(), {'archives': [], 'revisions': [], 'managementArchives': []})
-        # Corrupt JSON files also degrade cleanly
+        # Corrupt JSON files and non-dict JSON root also degrade cleanly
         d.PREFS.write_text('{bad json')
         self.assertEqual(d.prefs_view()['revoked'], [])
+        d.PREFS.write_text('["not-a-dict"]')
+        self.assertEqual(d.prefs_load(), [])
+        self.assertEqual(d.prefs_view()['items'], [])
         d.CHATFILE.write_text('{bad json')
         self.assertEqual(d.chat_config(), d.CHAT_DEFAULT)
+        # mark_applied writes applied.json atomically
+        d.mark_applied()
+        self.assertTrue((self.state / 'applied.json').is_file())
         # admin_backup works even if AUTHFILE does not exist yet
         (self.state / 'audit.jsonl').write_text('{"action":"test"}\n')
         res = d.admin_backup()

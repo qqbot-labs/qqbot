@@ -31,23 +31,38 @@ class Component(Input):component:str;action:str
 MAX_LOGIN_ATTEMPTS_KEYS = 4096
 
 def _https_netloc(parsed):
-    if not parsed.hostname:
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
         return ''
-    host = parsed.hostname.lower()
+    if not hostname or parsed.username or parsed.password:
+        return ''
+    host = hostname.lower()
     if ':' in host:
         host = f'[{host}]'
-    port = parsed.port
     return host if port in (None, 443) else f'{host}:{port}'
 
-def _normalize_origin(raw):
-    u = urlsplit(raw)
-    if not u.scheme or not u.hostname:
-        return raw.rstrip('/')
-    host = u.hostname.lower()
+def _normalize_origin(raw, *, allow_slash=False):
+    if not isinstance(raw, str) or not raw:
+        return ''
+    try:
+        u = urlsplit(raw)
+        hostname = u.hostname
+        port = u.port
+    except ValueError:
+        return ''
+    if u.scheme not in ('http', 'https') or not hostname:
+        return ''
+    if u.username or u.password or u.query or u.fragment:
+        return ''
+    if (u.path not in ('', '/')) if allow_slash else (u.path != ''):
+        return ''
+    host = hostname.lower()
     if ':' in host:
         host = f'[{host}]'
-    default_port = 443 if u.scheme == 'https' else 80 if u.scheme == 'http' else None
-    netloc = host if u.port in (None, default_port) else f'{host}:{u.port}'
+    default_port = 443 if u.scheme == 'https' else 80
+    netloc = host if port in (None, default_port) else f'{host}:{port}'
     return f'{u.scheme}://{netloc}'
 
 def _validate_new_password(password: str):
@@ -78,7 +93,11 @@ def create_app(data_dir=None,project_root=None,background=True):
     root=Path(project_root or Path(__file__).resolve().parents[1]);s=Store(data_dir or os.environ.get('QQAGENT_DATA',root/'.runtime'))
     runtime=Runtime(root);engine=Engine(s,runtime.versions)
     public_origin=os.environ.get('QQAGENT_PUBLIC_ORIGIN','')
-    public_url=urlsplit(public_origin)
+    try:
+        public_url=urlsplit(public_origin)
+        _public_port=public_url.port if public_origin else None
+    except ValueError:
+        raise ValueError('公网入口必须为不带路径和凭据的 HTTPS origin') from None
     if public_origin and (public_url.scheme!='https' or not public_url.hostname or public_url.username or public_url.password or public_url.path or public_url.query or public_url.fragment):
         raise ValueError('公网入口必须为不带路径和凭据的 HTTPS origin')
     # First password is only written to an owner-readable local file, never printed/logged.
@@ -108,13 +127,24 @@ def create_app(data_dir=None,project_root=None,background=True):
     public_netloc=_https_netloc(public_url) if public_origin else ''
     @app.middleware('http')
     async def security(req,call_next):
-        host=req.url.hostname
-        local_host=host in ('127.0.0.1','localhost','::1','testserver')
-        public_host=bool(public_origin) and req.url.scheme=='https' and _https_netloc(req.url)==public_netloc
+        try:
+            req_url=req.url
+            host=req_url.hostname
+            _req_port=req_url.port
+            has_userinfo=bool(req_url.username or req_url.password)
+        except ValueError:
+            return JSONResponse({'detail':'Host 不允许'},400)
+        if not host or has_userinfo:return JSONResponse({'detail':'Host 不允许'},400)
+        local_host=host.lower() in ('127.0.0.1','localhost','::1','testserver')
+        public_host=bool(public_origin) and req_url.scheme=='https' and bool(public_netloc) and _https_netloc(req_url)==public_netloc
         if not (local_host or public_host):return JSONResponse({'detail':'Host 不允许'},400)
         if req.method not in ('GET','HEAD','OPTIONS'):
             origin=req.headers.get('origin')
-            if origin and _normalize_origin(origin)!=_normalize_origin(str(req.base_url)):return JSONResponse({'detail':'Origin 不允许'},403)
+            if origin is not None:
+                norm_origin=_normalize_origin(origin)
+                norm_base=_normalize_origin(str(req.base_url),allow_slash=True)
+                if not norm_origin or not norm_base or norm_origin!=norm_base:
+                    return JSONResponse({'detail':'Origin 不允许'},403)
         # Authenticate & verify CSRF BEFORE buffering up to 8 MB of request body.
         if req.url.path.startswith('/api/') and req.url.path!='/api/login':
             sid=req.cookies.get('qqagent_session','');rows=s.rows('SELECT * FROM sessions WHERE id=? AND expires>?',(hashlib.sha256(sid.encode()).hexdigest(),now()))
@@ -392,7 +422,8 @@ def create_app(data_dir=None,project_root=None,background=True):
         payload=await req.json()
         async with engine.decide_lock:
             async with engine.send_lock:
-                return await asyncio.to_thread(backup.restore,s,payload)
+                async with engine.poll_lock:
+                    return await asyncio.to_thread(backup.restore,s,payload)
     @app.get('/api/diagnostics')
     def diagnostics():return {'version':'0.1.0','versions':runtime.versions(),'config_revision':s.get('revision'),'controls':{k:s.get(k) for k in ('pause_active','stop_all')},'logs':[{'action':r['action'],'result':r['result'],'created':r['created']} for r in s.rows('SELECT * FROM logs ORDER BY id DESC LIMIT 100')],'privacy':'不含凭据、人格、好友标识或聊天内容'}
     app.mount('/static',StaticFiles(directory=root/'qqagent/static'),name='static')

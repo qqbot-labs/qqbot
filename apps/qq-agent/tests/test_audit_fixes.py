@@ -121,10 +121,16 @@ async def test_context_limit_excludes_base64_image_data_and_webp_detected(tmp_pa
     messages = [{'role': 'user', 'content': [{'type': 'text', 'text': '看图'}, {'type': 'image_url', 'image_url': {'url': huge_image}}]}]
     with patch('qqagent.adapters.httpx.AsyncClient', lambda **kw: original(transport=httpx.MockTransport(lambda req: httpx.Response(200, json={'choices': [{'message': {'content': '是一张图'}}]})), **kw)):
         assert await ModelClient(s).complete(messages, kind='vision') == '是一张图'
-    # But genuinely oversized text is still rejected
+    # But genuinely oversized text is still rejected — including plain text starting with 'data:image/' (B2)
     too_long_text = [{'role': 'user', 'content': 'x' * 4000}]
     with pytest.raises(Rejected, match='上下文超过配置上限'):
         await ModelClient(s).complete(too_long_text, kind='vision')
+    spoofed_plain_str = [{'role': 'user', 'content': 'data:image/png;base64,' + ('A' * 10000)}]
+    with pytest.raises(Rejected, match='上下文超过配置上限'):
+        await ModelClient(s).complete(spoofed_plain_str, kind='vision')
+    spoofed_text_block = [{'role': 'user', 'content': [{'type': 'text', 'text': 'data:image/png;base64,' + ('A' * 10000)}]}]
+    with pytest.raises(Rejected, match='上下文超过配置上限'):
+        await ModelClient(s).complete(spoofed_text_block, kind='vision')
 
 
 @pytest.mark.asyncio
@@ -144,19 +150,24 @@ async def test_qzone_freshness_window_scales_with_poll_minutes_and_fenced_json_a
     await e.process_pending()
     assert len(e.channels.sent) == 2
 
-    # Active persona cleared between gate() and active_persona() -> decide_qzone exits cleanly without TypeError
-    e.ingest('qzone', {'user_id': '10001', 'event_id': 'feed:nop', 'tid': 'tnop', 'text': 'x', 'time': now() - 5})
-    item = s.rows("SELECT * FROM events WHERE id='qzone:feed:nop'")[0]
+    # Active persona cleared mid-batch -> decide_qzone expires ALL remaining processing items in batch (B3)
+    e.ingest('qzone', {'user_id': '10001', 'event_id': 'feed:nop1', 'tid': 'tnop1', 'text': 'x1', 'time': now() - 5})
+    e.ingest('qzone', {'user_id': '10001', 'event_id': 'feed:nop2', 'tid': 'tnop2', 'text': 'x2', 'time': now() - 4})
+    batch = s.rows("SELECT * FROM events WHERE id IN ('qzone:feed:nop1','qzone:feed:nop2') ORDER BY id")
+    assert len(batch) == 2
     with s.db() as c:
-        c.execute("UPDATE events SET state='processing' WHERE id=?", (item['id'],))
+        c.executemany("UPDATE events SET state='processing' WHERE id=?", [(r['id'],) for r in batch])
     orig_gate = e.gate
     def gate_then_disable(row):
         res = orig_gate(row)
-        s.set('persona_active', None)
+        # Clear persona directly in DB without triggering set()'s bulk expire so decide_qzone's own finish(items) is exercised
+        with s.db() as c:
+            c.execute("UPDATE meta SET v='null' WHERE k='persona_active'")
         return res
     with patch.object(e, 'gate', side_effect=gate_then_disable):
-        await e.decide_qzone('10001', [item])
-    assert s.rows("SELECT state FROM events WHERE id='qzone:feed:nop'")[0]['state'] in ('skipped', 'expired')
+        await e.decide_qzone('10001', batch)
+    states = {r['id']: r['state'] for r in s.rows("SELECT id, state FROM events WHERE id IN ('qzone:feed:nop1','qzone:feed:nop2')")}
+    assert states == {'qzone:feed:nop1': 'expired', 'qzone:feed:nop2': 'expired'}
 
 
 @pytest.mark.asyncio
@@ -326,3 +337,47 @@ def test_app_security_component_isolation_443_attempts_cap_and_password_change(t
     with TestClient(app, base_url='https://qqbot.example.com') as c:
         c.post('/api/login', json={'password': 'bad-password'}, headers={'origin': 'https://qqbot.example.com'})
     assert len(app.state.attempts) <= MAX_LOGIN_ATTEMPTS_KEYS
+
+
+def test_malformed_host_and_origin_return_400_or_403_never_500(tmp_path, monkeypatch):
+    """B1 regression: invalid ports, userinfo, paths, queries, fragments must return 400/403, never HTTP 500."""
+    monkeypatch.setenv('QQAGENT_PUBLIC_ORIGIN', 'https://qqbot.example.com')
+    app = create_app(tmp_path, background=False)
+    initial_pw = (tmp_path / 'admin-password.txt').read_text().strip()
+
+    # Malformed Host headers must return 400 (never 500)
+    with TestClient(app, base_url='https://qqbot.example.com', raise_server_exceptions=False) as c:
+        for bad_host in (
+            'qqbot.example.com:99999',
+            'qqbot.example.com:notaport',
+            'evil.com:443',
+            'user:pass@qqbot.example.com',
+            'user@localhost',
+            '[::1',
+            '',
+        ):
+            r = c.get('/', headers={'host': bad_host})
+            assert r.status_code == 400, f'Host={bad_host!r} returned {r.status_code}'
+
+        # Malformed / spoofed / path-bearing / credential-bearing Origin headers must return 403 (never 500 or 200)
+        for bad_origin in (
+            'https://qqbot.example.com:99999',
+            'https://qqbot.example.com:notaport',
+            'https://[::1',
+            'https://qqbot.example.com/extra',
+            'https://qqbot.example.com/',
+            'https://qqbot.example.com?x=1',
+            'https://qqbot.example.com#frag',
+            'https://user:pass@qqbot.example.com',
+            'https://evil.com:443',
+            'http://qqbot.example.com',
+            'null',
+            '',
+        ):
+            r = c.post('/api/login', json={'password': initial_pw}, headers={'origin': bad_origin})
+            assert r.status_code == 403, f'Origin={bad_origin!r} returned {r.status_code}'
+
+        # Legitimate :443 Origin still matches public origin cleanly
+        r_ok = c.post('/api/login', json={'password': initial_pw}, headers={'origin': 'https://qqbot.example.com:443'})
+        assert r_ok.status_code == 200
+

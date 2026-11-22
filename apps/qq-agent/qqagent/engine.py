@@ -407,7 +407,7 @@ class Engine:
                 continue
             persona = self.s.active_persona()
             if not persona:
-                self.finish([item], 'expired')
+                self.finish(items, 'expired')
                 return
             # This path never reads private histories or memories.
             answer = await self.model.complete([

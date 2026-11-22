@@ -695,8 +695,11 @@ try:
             os.unlink(t_db + '-wal')
         a_db, a_wal = snap(src_abs), snap(wal)
         if (b_db, b_wal) == (a_db, a_wal):
-            if try_connect(t_db, uri=False):
-                sys.exit(0)
+            try:
+                if try_connect(t_db, uri=False):
+                    sys.exit(0)
+            except (sqlite3.OperationalError, RuntimeError):
+                pass
         time.sleep(0.2)
     sys.exit(1)
 finally:

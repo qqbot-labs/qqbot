@@ -173,12 +173,15 @@ def segments(raw):
     return out
 
 def _strip_image_payloads(obj):
-    """Replace inline base64 data:image/ URLs with a fixed token before measuring text context chars."""
-    if isinstance(obj, str):
-        return '[image]' if obj.startswith('data:image/') else obj
+    """Replace inline base64 data:image/ URLs inside image_url blocks before measuring text context chars."""
     if isinstance(obj, list):
         return [_strip_image_payloads(item) for item in obj]
     if isinstance(obj, dict):
+        if obj.get('type') == 'image_url' and isinstance(obj.get('image_url'), dict):
+            img = obj['image_url']
+            url = img.get('url')
+            if isinstance(url, str) and url.startswith('data:image/'):
+                return {**obj, 'image_url': {**img, 'url': '[image]'}}
         return {k: _strip_image_payloads(v) for k, v in obj.items()}
     return obj
 

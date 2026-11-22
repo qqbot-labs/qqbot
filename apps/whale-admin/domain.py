@@ -445,7 +445,9 @@ def _prefs_revoked():
     except (OSError,ValueError):return []
 
 def prefs_load():
-    try:items=json.loads(PREFS.read_text()).get('items',[])
+    try:
+        parsed=json.loads(PREFS.read_text()) if PREFS.exists() else {}
+        items=parsed.get('items',[]) if isinstance(parsed,dict) else []
     except (OSError,ValueError):items=[]
     valid=[];seen=set()
     for x in items if isinstance(items,list) else []:
@@ -551,7 +553,9 @@ def backups_list():
 
 def mark_applied():
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
-    (STATE/'applied.json').write_text(json.dumps({'hash':applied_digest(),'at':time.time()}))
+    raw=(json.dumps({'hash':applied_digest(),'at':time.time()})+'\n').encode()
+    owner=(0,0) if os.geteuid()==0 else (os.getuid(),os.getgid())
+    atomic(STATE/'applied.json',raw,owner=owner)
 
 def service_action(action):
     if action not in ['start','stop','restart','apply']:raise Error('不支持的服务操作')
