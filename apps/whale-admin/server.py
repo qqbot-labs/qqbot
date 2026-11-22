@@ -17,6 +17,15 @@ SESSIONS={};ATTEMPTS={};AUTH_LOCK=threading.RLock()
 
 def encode(value):return (json.dumps(value,ensure_ascii=False)+'\n').encode()
 def password_hash(password,salt):return hashlib.scrypt(password.encode(),salt=bytes.fromhex(salt),n=16384,r=8,p=1).hex()
+def load_auth():
+    path=DATA/'auth.json'
+    if not path.is_file() or path.is_symlink():return None
+    try:
+        auth=json.loads(path.read_text())
+        if not isinstance(auth,dict) or not isinstance(auth.get('salt'),str) or not isinstance(auth.get('hash'),str):return None
+        return auth
+    except (OSError,ValueError):return None
+
 def set_password(password):
     if not isinstance(password,str) or len(password)>200 or len(password)<(3 if re.fullmatch(r'[\u3400-\u4dbf\u4e00-\u9fff]+',password) else 6):raise ValueError('纯中文密码至少3个汉字，其他密码至少6个字符；最多200字符')
     salt=secrets.token_hex(16);payload={'salt':salt,'hash':password_hash(password,salt)}
@@ -127,7 +136,8 @@ class Handler(BaseHTTPRequestHandler):
                 password=body.get('password','')
                 if not isinstance(password,str) or len(password)>200:return self.reply(400,{'ok':False,'error':'密码格式无效'})
                 attempts.append(now)
-                auth=json.loads((DATA/'auth.json').read_text())
+                auth=load_auth()
+                if not auth:return self.reply(503,{'ok':False,'error':'管理密码尚未初始化，请先在服务器初始化'})
                 if not hmac.compare_digest(password_hash(password,auth['salt']),auth['hash']):return self.reply(401,{'ok':False,'error':'密码不正确'})
                 ATTEMPTS[ip]=[]
                 # Bound memory even when old browsers never log out.
@@ -145,7 +155,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/api/password':
             try:
                 with AUTH_LOCK:
-                    auth=json.loads((DATA/'auth.json').read_text())
+                    auth=load_auth()
+                    if not auth:return self.reply(503,{'ok':False,'error':'管理密码尚未初始化，请先在服务器初始化'})
                     old=body.get('old','');new=body.get('password','')
                     if not isinstance(old,str) or not isinstance(new,str) or not hmac.compare_digest(password_hash(old,auth['salt']),auth['hash']):raise ValueError('当前密码不正确')
                     set_password(new)

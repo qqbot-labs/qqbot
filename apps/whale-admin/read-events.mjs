@@ -1,10 +1,10 @@
 import { readFileSync,readdirSync,statSync } from 'node:fs';
 import { join,basename } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
-const root='/home/qqwhale/.dsh/sessions',magic=Buffer.from([0x28,0xb5,0x2f,0xfd]);
+const dshHome=process.env.DSH_HOME||'/home/qqwhale/.dsh',root=join(dshHome,'sessions'),magic=Buffer.from([0x28,0xb5,0x2f,0xfd]);
 const mode=process.argv[2]||'calls',wanted=process.argv[3]||'';
 const files=[];
-function walk(d,depth=0){if(depth>4||files.length>=250)return;for(const e of readdirSync(d,{withFileTypes:true})){const p=join(d,e.name);if(e.isDirectory())walk(p,depth+1);else if(e.isFile()&&e.name==='session.v4.jsonl.zstd'&&statSync(p).size<=32*1024*1024)files.push(p)}}
+function walk(d,depth=0){if(depth>4||files.length>=250)return;let entries;try{entries=readdirSync(d,{withFileTypes:true})}catch(e){if(e?.code==='ENOENT'||e?.code==='ENOTDIR')return;throw e}for(const e of entries){const p=join(d,e.name);if(e.isDirectory())walk(p,depth+1);else if(e.isFile()&&e.name==='session.v4.jsonl.zstd'){try{if(statSync(p).size<=32*1024*1024)files.push(p)}catch{}}}}
 function events(file){const b=readFileSync(file),starts=[];let p=0;while((p=b.indexOf(magic,p))!==-1){starts.push(p);p+=4}let lines='';for(let i=0;i<starts.length;i++){try{lines+=zstdDecompressSync(b.subarray(starts[i],starts[i+1]||b.length),{maxOutputLength:16*1024*1024}).toString('utf8')}catch{}}return lines.split('\n').flatMap(s=>{try{return [JSON.parse(s)]}catch{return []}})}
 walk(root);
 const calls=[],messages=[],thinking=[];let types={};

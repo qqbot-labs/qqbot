@@ -1,7 +1,10 @@
 """Whale-only privileged operations. No shell, arbitrary paths, or generic commands."""
 import base64, contextlib, copy, datetime, hashlib, json, os, pwd, re, shutil, sqlite3, subprocess, tempfile, threading, time, urllib.request
 from pathlib import Path
-import yaml
+try:
+    import yaml
+except ImportError:  # pragma: no cover - optional on dev hosts without PyYAML
+    yaml = None
 
 ROOT = Path(os.environ.get('WHALE_ROOT', '/home/qqwhale/whale'))
 DSH = Path(os.environ.get('DSH_HOME', '/home/qqwhale/.dsh'))
@@ -19,8 +22,16 @@ PERSONA_HASH = '3aafe387ec338bdc6ce1381b59f83963b10a92d91927dcc36b4d307b14110dc6
 PERSONA_MAX_BYTES = 0
 CHATFILE = ROOT / 'etc/chat-delivery.json'
 CHAT_DEFAULT = {'shortLimit':36,'targetChars':28,'longSentenceChars':64,'minMessageChars':8,'maxMessages':0,'messageDelayMs':650,'typingMsPerChar':8}
-def chat_bytes():return CHATFILE.read_bytes() if CHATFILE.exists() else b''
-def chat_config():return {**CHAT_DEFAULT,**(json.loads(chat_bytes()) if chat_bytes() else {})}
+def chat_bytes():
+    try:return CHATFILE.read_bytes() if CHATFILE.exists() else b''
+    except OSError:return b''
+def chat_config():
+    raw=chat_bytes()
+    if not raw:return dict(CHAT_DEFAULT)
+    try:
+        parsed=json.loads(raw)
+        return {**CHAT_DEFAULT,**(parsed if isinstance(parsed,dict) else {})}
+    except ValueError:return dict(CHAT_DEFAULT)
 LOCK = threading.RLock()
 
 class Error(Exception): pass
@@ -41,17 +52,27 @@ def effective_reasoning(model,preferred):
     if 'high' in levels:return 'high'
     return levels[-1]
 
-class Loader(yaml.SafeLoader): pass
-# Match js-yaml's YAML 1.2 booleans: "off" must remain a string/key.
-Loader.yaml_implicit_resolvers = {k:[x for x in v if x[0]!='tag:yaml.org,2002:bool'] for k,v in yaml.SafeLoader.yaml_implicit_resolvers.items()}
-Loader.add_implicit_resolver('tag:yaml.org,2002:bool', re.compile(r'^(?:true|false|True|False|TRUE|FALSE)$'), list('tTfF'))
-class Dumper(yaml.SafeDumper): pass
-def represent_str(dumper, value):
-    return dumper.represent_scalar('tag:yaml.org,2002:str', value, style='"' if any(c in value for c in '\r\x85\u2028\u2029') else None)
-Dumper.add_representer(str, represent_str)
+if yaml is not None:
+    class Loader(yaml.SafeLoader): pass
+    # Match js-yaml's YAML 1.2 booleans: "off" must remain a string/key.
+    Loader.yaml_implicit_resolvers = {k:[x for x in v if x[0]!='tag:yaml.org,2002:bool'] for k,v in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+    Loader.add_implicit_resolver('tag:yaml.org,2002:bool', re.compile(r'^(?:true|false|True|False|TRUE|FALSE)$'), list('tTfF'))
+    class Dumper(yaml.SafeDumper): pass
+    def represent_str(dumper, value):
+        return dumper.represent_scalar('tag:yaml.org,2002:str', value, style='"' if any(c in value for c in '\r\x85\u2028\u2029') else None)
+    Dumper.add_representer(str, represent_str)
+else:
+    Loader = None
+    Dumper = None
+
+def _require_yaml():
+    if yaml is None: raise Error('缺少 PyYAML 运行依赖')
 
 def load_profile():
-    x=yaml.load(PROFILE.read_text(), Loader=Loader)
+    _require_yaml()
+    try:text=PROFILE.read_text()
+    except OSError as e:raise Error('无法读取运行配置：'+redact(str(e))) from None
+    x=yaml.load(text, Loader=Loader)
     if not isinstance(x,list): raise Error('运行配置不是有效的插件列表')
     return x
 
@@ -111,8 +132,16 @@ def persona_archive(raw):
 def persona_lock_bytes(raw,style,revision):
     return (json.dumps({'sha256':digest(raw),'bytes':len(raw),'crlf':raw.count(b'\r\n'),'lineEnding':style,'at':time.time(),'revision':revision},ensure_ascii=False,indent=2)+'\n').encode()
 
-def profile_revision(raw):
-    return digest(raw+MEMCFG.read_bytes()+ENVFILE.read_bytes())
+def _safe_bytes(path):
+    try:return path.read_bytes() if path.exists() else b''
+    except OSError:return b''
+
+def profile_revision(raw=None):
+    profile_raw=_safe_bytes(PROFILE) if raw is None else raw
+    return digest(profile_raw+_safe_bytes(MEMCFG)+_safe_bytes(ENVFILE)+chat_bytes())
+
+def applied_digest():
+    return digest(_safe_bytes(PROFILE)+_safe_bytes(MEMCFG)+_safe_bytes(ENVFILE))
 
 def persona_semantics(rows):
     data=copy.deepcopy(rows)
@@ -120,7 +149,9 @@ def persona_semantics(rows):
         if row_.get('id')=='persona' and isinstance(row_.get('config'),dict):row_['config'].pop('prefix',None)
     return data
 def envvalues():
-    return dict(l.split('=',1) for l in ENVFILE.read_text().splitlines() if '=' in l and not l.startswith('#'))
+    try:text=ENVFILE.read_text() if ENVFILE.exists() else ''
+    except OSError:return {}
+    return dict(l.split('=',1) for l in text.splitlines() if '=' in l and not l.startswith('#'))
 
 def redact(s):
     try:
@@ -172,14 +203,20 @@ def audit(action,result='ok'):
 def get_config():
     rows=load_profile();qq=conf(rows,'im-qqbot');p=conf(rows,'llm-pi-ai')['providers']['whale-gateway'];m=next((x for x in p['models'] if x['id']==conf(rows,'agent-default-model').get('model')),p['models'][0]);d=conf(rows,'agent-default-model');cp=conf(rows,'compaction-basic')
     prefix=conf(rows,'persona')['prefix'];e=envvalues()
-    mem=json.loads(MEMCFG.read_text()) if MEMCFG.exists() else {}
+    try:
+        parsed_mem=json.loads(MEMCFG.read_text()) if MEMCFG.exists() else {}
+        mem=parsed_mem if isinstance(parsed_mem,dict) else {}
+    except (OSError,ValueError):mem={}
     models=[{'id':x.get('id'),'name':x.get('name',x.get('id')),'contextWindow':x.get('contextWindow'),'maxTokens':x.get('maxTokens'),'reasoningEfforts':reasoning_efforts(x)} for x in p['models']]
-    return {'revision':digest(PROFILE.read_bytes()+MEMCFG.read_bytes()+ENVFILE.read_bytes()+chat_bytes()),'model':{'baseURL':p['baseURL'],'id':m['id'],'name':m.get('name',m['id']),'contextWindow':m['contextWindow'],'maxTokens':m['maxTokens'],'reasoningEffort':effective_reasoning(m,d.get('reasoningEffort','off')),'reasoningEfforts':reasoning_efforts(m),'timeoutMs':p.get('timeoutMs',90000),'streamIdleTimeoutMs':p.get('streamIdleTimeoutMs',30000)},'compaction':{k:cp.get(k,v) for k,v in {'thresholdRatio':0.55,'retainRatio':0.25,'maxOverflowRetries':2}.items()},'qq':{'appid':e.get('QQBOT_APPID',''),'c2cMode':qq['access']['c2cMode'],'c2cAllow':qq['access'].get('c2cAllow',[]),'groupMode':qq['access'].get('groupMode','disabled'),'groupAllow':qq['access'].get('groupAllow',[]),'textChunkLimit':qq.get('textChunkLimit',4500),'processingTimeoutMs':qq.get('processingTimeoutMs',120000),'sessionIdleTimeout':qq.get('sessionIdleTimeout',1800000),'streaming':qq.get('streaming',False),'maxQueue':qq.get('maxQueue',0)},'sticker':copy.deepcopy(qq['sticker']),'memory':mem,'chat':chat_config(),'persona':persona_view(prefix),'credentials':{'qqSecret':bool(e.get('QQBOT_SECRET')),'modelKey':bool(e.get('WHALE_API_KEY'))},'availableModels':models,'settingsApplied':pending_status()}
+    return {'revision':profile_revision(),'model':{'baseURL':p['baseURL'],'id':m['id'],'name':m.get('name',m['id']),'contextWindow':m['contextWindow'],'maxTokens':m['maxTokens'],'reasoningEffort':effective_reasoning(m,d.get('reasoningEffort','off')),'reasoningEfforts':reasoning_efforts(m),'timeoutMs':p.get('timeoutMs',90000),'streamIdleTimeoutMs':p.get('streamIdleTimeoutMs',30000)},'compaction':{k:cp.get(k,v) for k,v in {'thresholdRatio':0.55,'retainRatio':0.25,'maxOverflowRetries':2}.items()},'qq':{'appid':e.get('QQBOT_APPID',''),'c2cMode':qq['access']['c2cMode'],'c2cAllow':qq['access'].get('c2cAllow',[]),'groupMode':qq['access'].get('groupMode','disabled'),'groupAllow':qq['access'].get('groupAllow',[]),'textChunkLimit':qq.get('textChunkLimit',4500),'processingTimeoutMs':qq.get('processingTimeoutMs',120000),'sessionIdleTimeout':qq.get('sessionIdleTimeout',1800000),'streaming':qq.get('streaming',False),'maxQueue':qq.get('maxQueue',0)},'sticker':copy.deepcopy(qq['sticker']),'memory':mem,'chat':chat_config(),'persona':persona_view(prefix),'credentials':{'qqSecret':bool(e.get('QQBOT_SECRET')),'modelKey':bool(e.get('WHALE_API_KEY'))},'availableModels':models,'settingsApplied':pending_status()}
 
 def pending_status():
     marker=STATE/'applied.json'
-    current=digest(PROFILE.read_bytes()+MEMCFG.read_bytes()+ENVFILE.read_bytes())
-    applied=json.loads(marker.read_text()).get('hash') if marker.exists() else None
+    current=applied_digest()
+    try:
+        data=json.loads(marker.read_text()) if marker.exists() else None
+        applied=data.get('hash') if isinstance(data,dict) else None
+    except (OSError,ValueError):applied=None
     return {'pendingRestart':current!=applied,'known':applied is not None}
 
 def validate_payload(body):
@@ -272,6 +309,7 @@ def save_config(body):
 
 def persona_save(body):
     """把编辑后的人格写入真实 profile；换行符按当前版本风格还原以保持字节可复现。"""
+    _require_yaml()
     if set(body)-{'revision','text','confirm'} or not isinstance(body.get('text'),str):raise Error('只允许修改人格原文')
     if body.get('confirm') is not True:raise Error('请确认后保存人格原文')
     text=body['text']
@@ -379,9 +417,17 @@ def memory_info(args):
 
 @contextlib.contextmanager
 def prefs_lock():
+    PREFS.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
     lock=Path(str(PREFS)+'.lock');deadline=time.time()+5
     while True:
-        try:os.mkdir(lock,0o777);os.chmod(lock,0o777);break
+        try:
+            os.mkdir(lock,0o700);os.chmod(lock,0o700)
+            if os.geteuid()==0:
+                try:
+                    u=pwd.getpwnam('qqwhale')
+                    os.chown(lock,u.pw_uid,u.pw_gid)
+                except (KeyError,OSError):pass
+            break
         except FileExistsError:
             try:
                 if time.time()-lock.stat().st_mtime>10:shutil.rmtree(lock,ignore_errors=True);continue
@@ -390,6 +436,13 @@ def prefs_lock():
             time.sleep(.02)
     try:yield
     finally:shutil.rmtree(lock,ignore_errors=True)
+
+def _prefs_revoked():
+    try:
+        data=json.loads(PREFS.read_text()) if PREFS.exists() else {}
+        revoked=data.get('revoked',[]) if isinstance(data,dict) else []
+        return revoked if isinstance(revoked,list) else []
+    except (OSError,ValueError):return []
 
 def prefs_load():
     try:items=json.loads(PREFS.read_text()).get('items',[])
@@ -412,9 +465,7 @@ def prefs_write(items,label,revoked=None):
     STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
     folder=STATE/'persona-prefs-revisions';folder.mkdir(mode=0o700,parents=True,exist_ok=True)
     if PREFS.exists() and not PREFS.is_symlink():shutil.copyfile(PREFS,folder/(stamp()+'.json'))
-    if revoked is None:
-        try:revoked=json.loads(PREFS.read_text()).get('revoked',[])
-        except (OSError,ValueError):revoked=[]
+    if revoked is None:revoked=_prefs_revoked()
     raw=(json.dumps({'version':1,'items':items,'revoked':revoked},ensure_ascii=False,indent=2)+'\n').encode()
     u=pwd.getpwnam('qqwhale')
     atomic(PREFS,raw,owner=(u.pw_uid,u.pw_gid));os.chmod(PREFS,0o600)
@@ -422,7 +473,7 @@ def prefs_write(items,label,revoked=None):
     return prefs_view()
 
 def prefs_view():
-    return {'items':prefs_load(),'revoked':(json.loads(PREFS.read_text()).get('revoked',[]) if PREFS.exists() else []),'maxItems':PREF_MAX_ITEMS,'maxChars':PREF_MAX_CHARS,'revision':digest(PREFS.read_bytes()) if PREFS.exists() else ''}
+    return {'items':prefs_load(),'revoked':_prefs_revoked(),'maxItems':PREF_MAX_ITEMS,'maxChars':PREF_MAX_CHARS,'revision':digest(_safe_bytes(PREFS)) if PREFS.exists() else ''}
 
 def prefs_add(args):
     if args.get('confirm') is not True:raise Error('需要确认后添加长期偏好')
@@ -444,7 +495,7 @@ def prefs_delete(args):
         items=prefs_load();kept=[x for x in items if x['id']!=ident]
         if len(kept)==len(items):raise Error('偏好不存在或已删除')
         old=next(x for x in items if x['id']==ident)
-        revoked=json.loads(PREFS.read_text()).get('revoked',[])
+        revoked=_prefs_revoked()
         if old.get('key'):revoked=[x for x in revoked if x.get('key')!=old['key']]+[{'key':old['key'],'kind':old.get('kind'),'ts':int(time.time()*1000)}]
         result=prefs_write(kept,'preferences.delete',revoked)
     return {**result,'message':'长期人格偏好已删除，后续对话不再注入。'}
@@ -458,8 +509,10 @@ def media_list(args):
     return {'items':[{k:i.get(k) for k in ['id','ext','layer','size','capturedAt','useCount','tags','desc','needsDescribe']} for i in matches[offset:offset+36]],'counts':counts,'total':len(matches),'offset':offset}
 
 def media_image(args):
-    ident=str(args.get('id',''));items=json.loads((MEDIA/'index.json').read_text()).get('items',[])
-    item=next((i for i in items if i.get('id')==ident),None)
+    ident=str(args.get('id',''))
+    try:items=json.loads((MEDIA/'index.json').read_text()).get('items',[])
+    except (OSError,ValueError):items=[]
+    item=next((i for i in items if isinstance(i,dict) and i.get('id')==ident),None)
     if not item or not re.fullmatch(r'[a-zA-Z0-9_-]{6,80}',ident):raise Error('图片不存在')
     ext=str(item.get('ext','')).lower();layer=item.get('layer')
     if ext not in ['png','jpg','jpeg','gif','webp'] or layer not in ['candidate','library','negative','trash']:raise Error('图片格式不支持')
@@ -470,163 +523,198 @@ def media_image(args):
 
 def backups_list():
     items=[]
-    for p in sorted((ROOT/'backups').glob('whale-*.tar.gz'),reverse=True):
-        if p.is_file() and not p.is_symlink():items.append({'name':p.name,'bytes':p.stat().st_size,'at':p.stat().st_mtime})
-    current=digest(conf(load_profile(),'persona')['prefix'].encode())
+    backups_dir=ROOT/'backups'
+    if backups_dir.is_dir():
+        for p in sorted(backups_dir.glob('whale-*.tar.gz'),reverse=True):
+            if p.is_file() and not p.is_symlink():items.append({'name':p.name,'bytes':p.stat().st_size,'at':p.stat().st_mtime})
+    current=None
+    if PROFILE.exists() and yaml is not None:
+        try:current=digest(conf(load_profile(),'persona')['prefix'].encode())
+        except Exception:current=None
     rev=[]
-    for p in sorted((STATE/'revisions').glob('*'),reverse=True):
-        if p.is_dir() and (p/'meta.json').exists():
-            item={'id':p.name,**json.loads((p/'meta.json').read_text())};item['restorable']=False
-            try:item['restorable']=digest(conf(yaml.load((p/'profile.yml').read_text(),Loader=Loader),'persona')['prefix'].encode())==current
-            except Exception:pass
-            rev.append(item)
-    return {'archives':items[:30],'revisions':rev[:30],'managementArchives':[{'name':p.name,'bytes':p.stat().st_size,'at':p.stat().st_mtime} for p in sorted((STATE/'backups').glob('admin-*.tar.gz'),reverse=True)]}
+    rev_dir=STATE/'revisions'
+    if rev_dir.is_dir():
+        for p in sorted(rev_dir.glob('*'),reverse=True):
+            if p.is_dir() and (p/'meta.json').exists():
+                try:meta=json.loads((p/'meta.json').read_text())
+                except (OSError,ValueError):continue
+                if not isinstance(meta,dict):continue
+                item={'id':p.name,**meta};item['restorable']=False
+                try:
+                    if current is not None and yaml is not None and (p/'profile.yml').is_file():
+                        item['restorable']=digest(conf(yaml.load((p/'profile.yml').read_text(),Loader=Loader),'persona')['prefix'].encode())==current
+                except Exception:pass
+                rev.append(item)
+    mgmt_dir=STATE/'backups'
+    mgmt=[{'name':p.name,'bytes':p.stat().st_size,'at':p.stat().st_mtime} for p in sorted(mgmt_dir.glob('admin-*.tar.gz'),reverse=True) if p.is_file() and not p.is_symlink()] if mgmt_dir.is_dir() else []
+    return {'archives':items[:30],'revisions':rev[:30],'managementArchives':mgmt}
 
 def mark_applied():
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
-    (STATE/'applied.json').write_text(json.dumps({'hash':digest(PROFILE.read_bytes()+MEMCFG.read_bytes()+ENVFILE.read_bytes()),'at':time.time()}))
+    (STATE/'applied.json').write_text(json.dumps({'hash':applied_digest(),'at':time.time()}))
 
 def service_action(action):
     if action not in ['start','stop','restart','apply']:raise Error('不支持的服务操作')
     cmd='restart' if action=='apply' else action
-    if cmd!='stop':run(['/usr/bin/python3',str(ROOT/'bin/harden-plugin.py'),'--check',str(DSH/'profiles/web/node_modules/@zaofan/dsh-qqbot')])
+    if cmd!='stop':
+        plugin_dir=str(DSH/'profiles/web/node_modules/@zaofan/dsh-qqbot')
+        run(['/usr/bin/python3',str(ROOT/'bin/harden-plugin.py'),'--check',plugin_dir])
+        run(['/usr/bin/python3',str(ROOT/'bin/apply-chat-splitter.py'),'--check',plugin_dir])
     run(['/usr/bin/systemctl',cmd,'qqwhale.service'],timeout=40)
     status=service_status()
     if cmd!='stop' and status.get('ActiveState')=='active':
-        STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
-        (STATE/'applied.json').write_text(json.dumps({'hash':digest(PROFILE.read_bytes()+MEMCFG.read_bytes()+ENVFILE.read_bytes()),'at':time.time()}))
+        mark_applied()
     audit('service.'+action)
     return {'service':status,'message':'服务操作已完成。请留意最新会话和健康状态。'}
 
+MUTATING_METHODS = frozenset({
+    'proactive.save', 'instructions.save', 'search.save',
+    'vision.save', 'models.sync', 'session.action', 'routing.save', 'media.action',
+    'binding.open', 'binding.confirm', 'preferences.add', 'preferences.delete',
+    'config.save', 'persona.save', 'service', 'memory.forget', 'config.restore',
+})
+
+def _dispatch_unlocked(method,args):
+    if method in ['proactive','proactive.save','proactive.test']:
+        import proactive as p
+        if method=='proactive':return p.get()
+        if method=='proactive.save':return p.save(args)
+        return p.test(args)
+    if method in ['instructions','instructions.save','search','search.save','search.test']:
+        import workspace as w
+        if method=='instructions':return w.instructions_get()
+        if method=='instructions.save':return w.instructions_save(args)
+        if method=='search':return w.search_get()
+        if method=='search.save':return w.search_save(args)
+        if method=='search.test':return w.search_test(args)
+    if method in ['connection','sessions','calls','thinking','models.sync','session.action','routing','routing.save','media.action','model.probe','vision','vision.save','vision.probe','vision.models']:
+        import integrations as i
+        if method=='thinking':return i.thinking(args)
+        if method=='vision':return i.vision_get()
+        if method=='vision.save':return i.vision_save(args)
+        if method=='vision.probe':return i.vision_probe(args)
+        if method=='vision.models':return {'models':i.vision_models(True),'message':'已刷新网关公告支持图片的模型目录。'}
+        if method=='connection':return i.bridge('status')
+        if method=='sessions':return i.sessions()
+        if method=='calls':return i.calls(args)
+        if method=='model.probe':return i.probe(args)
+        if method=='models.sync':return i.register_models()
+        if method=='session.action':return i.session_action(args)
+        if method=='routing':return i.routing_get()
+        if method=='routing.save':return i.routing_save(args)
+        if method=='media.action':
+            if args.get('action') not in ['tag','promote','trash','restore','delete']:raise Error('图库操作无效')
+            if args.get('confirm') is not True:raise Error('需要确认图库操作')
+            index=MEDIA/'index.json'; folder=STATE/'media-revisions';folder.mkdir(mode=0o700,parents=True,exist_ok=True)
+            if index.is_file() and not index.is_symlink():shutil.copyfile(index,folder/(stamp()+'.json'))
+            result=i.bridge('media.'+args['action'],id=args.get('id'),tags=args.get('tags'),desc=args.get('desc'));audit('media.'+args['action']);return result
+    if method=='binding':
+        until=ROOT/'data/.bind-until';ids=ROOT/'data/.bind-openids'
+        if until.is_symlink() or ids.is_symlink():raise Error('绑定记录路径无效')
+        try:deadline=int(until.read_text().strip() or '0') if until.exists() else 0
+        except (OSError,ValueError):deadline=0
+        captured=sorted(set(x for x in ids.read_text().splitlines() if re.fullmatch(r'[a-fA-F0-9]{32}',x))) if ids.exists() else []
+        return {'until':deadline,'active':deadline>time.time()*1000,'senders':captured}
+    if method=='binding.open':
+        if args.get('confirm') is not True:raise Error('需要确认后捕获身份')
+        run([str(ROOT/'bin/whale-ctl'),'bind-capture'],timeout=45);mark_applied();audit('binding.open');return {'message':'已关闭私聊并打开 5 分钟身份捕获。请用自己的 QQ 私聊后刷新候选列表。'}
+    if method=='binding.confirm':
+        peer=args.get('peer');ids=ROOT/'data/.bind-openids'
+        if args.get('confirm') is not True or not isinstance(peer,str) or not re.fullmatch(r'[a-fA-F0-9]{32}',peer) or ids.is_symlink() or not ids.exists() or peer not in ids.read_text().splitlines():raise Error('只能绑定你已确认的捕获身份')
+        snapshot('绑定 QQ 身份')
+        run([str(ROOT/'bin/whale-ctl'),'allow-admin',peer],timeout=45)
+        for name in ['.bind-until','.bind-openids']:
+            path=ROOT/'data'/name
+            if path.exists():path.unlink()
+        mark_applied();audit('binding.confirm');return {'message':'该 QQ 身份已绑定为私聊管理员，服务已应用新白名单。'}
+    if method=='status':return service_status()
+    if method=='overview':return overview()
+    if method=='preferences':return prefs_view()
+    if method=='preferences.add':return prefs_add(args)
+    if method=='preferences.delete':return prefs_delete(args)
+    if method=='config':return get_config()
+    if method=='config.save':return save_config(args)
+    if method=='persona.save':return persona_save(args)
+    if method=='service':return service_action(args.get('action'))
+    if method=='memory':return memory_info(args)
+    if method=='memory.forget':
+        ident=args.get('id')
+        if type(ident)!=int or ident<=0 or args.get('confirm') is not True:raise Error('请确认有效的记录编号')
+        run(['/usr/bin/python3',str(Path(__file__).with_name('server.py')),'forget',str(ident)],as_bot=True)
+        audit('memory.forget:'+str(ident));return {'message':'记录已软删除；可通过管理员备份审计恢复。'}
+    if method=='media':return media_list(args)
+    if method=='media.image':return media_image(args)
+    if method=='backups':return backups_list()
+    if method=='backup.create':
+        # Do not hold global LOCK across slow whale-backup.sh archiving.
+        run([str(ROOT/'bin/whale-backup.sh')],timeout=90,as_bot=True)
+        with LOCK:
+            admin=admin_backup();audit('backup.create')
+        return {'message':'机器人与管理台私有备份均已生成','management':admin,'backups':backups_list()}
+    if method=='config.restore':
+        _require_yaml()
+        ident=str(args.get('id',''))
+        if not re.fullmatch(r'\d{8}T\d{6}-[a-f0-9]{6}',ident) or args.get('confirm') is not True:raise Error('配置快照编号无效')
+        folder=STATE/'revisions'/ident
+        if not (folder/'profile.yml').is_file():raise Error('快照不存在')
+        candidate=yaml.load((folder/'profile.yml').read_text(),Loader=Loader)
+        current_rows=load_profile();current_persona=conf(current_rows,'persona')['prefix'].encode()
+        # 与当前实际运行人格比较，绝不通过恢复快照改动人格；锁文件缺失或写入崩溃也不能绕过。
+        if digest(conf(candidate,'persona')['prefix'].encode())!=digest(current_persona):raise Error('快照人格与当前人格不一致，拒绝恢复')
+        restore_credentials=args.get('restoreCredentials') is True
+        if not restore_credentials:
+            current_qq=conf(current_rows,'im-qqbot');restored_qq=conf(candidate,'im-qqbot')
+            snapshot_env=dict(l.split('=',1) for l in (folder/'qqbot.env').read_text().splitlines() if '=' in l and not l.startswith('#')) if (folder/'qqbot.env').exists() else {}
+            if snapshot_env.get('QQBOT_APPID')!=envvalues().get('QQBOT_APPID'):
+                restored_qq['access']=copy.deepcopy(current_qq['access'])
+                restored_qq.setdefault('groupAdmin',{})['owners']=copy.deepcopy(current_qq.get('groupAdmin',{}).get('owners',[]))
+            restored_qq['appId']='__FROM_ENV__';restored_qq['appSecret']='__FROM_ENV__'
+        revision=snapshot('恢复前备份')
+        # Routine settings rollback must not revive a revoked QQ/API key.
+        atomic(PROFILE,yaml.dump(candidate,Dumper=Dumper,allow_unicode=True,sort_keys=False,width=100000).encode())
+        for n,pth in [('memory.json',MEMCFG),('chat-delivery.json',CHATFILE),*([('qqbot.env',ENVFILE)] if restore_credentials else [])]:
+            if (folder/n).exists():atomic(pth,(folder/n).read_bytes())
+        audit('config.restore');return {'message':'配置已恢复，当前凭据保留。点击应用配置后生效。' if not restore_credentials else '配置与所选快照凭据已恢复，请确认平台密钥仍有效后应用。','backup':revision,'config':get_config()}
+    if method=='logs':
+        logs=[]
+        for name in ['dsh.log','dsh.err.log']:
+            path=ROOT/'logs'/name
+            if path.exists():
+                with path.open('rb') as f:f.seek(max(0,path.stat().st_size-24000));text=f.read().decode('utf-8','replace')
+                logs.append({'name':name,'text':redact('\n'.join(text.splitlines()[-90:]))})
+        auditpath=STATE/'audit.jsonl'
+        return {'logs':logs,'audit':auditpath.read_text()[-16000:] if auditpath.exists() else ''}
+    if method=='models':
+        p=get_config()['model'];e=envvalues()
+        # Endpoint is fixed to the configured gateway, never supplied by an HTTP request.
+        expected=(os.environ.get('WHALE_API_BASE') or 'https://api.example.com/v1').rstrip('/')
+        if p['baseURL'].rstrip('/')!=expected:raise Error('模型网关地址不在配置范围')
+        req=urllib.request.Request(p['baseURL']+'/models',headers={'Authorization':'Bearer '+e.get('WHALE_API_KEY','')})
+        with urllib.request.urlopen(req,timeout=15) as r:x=json.load(r)
+        data=[{k:m.get(k) for k in ['id','name','routing_name','context_length','max_output_tokens']} for m in x.get('data',[])]
+        return {'models':data,'message':'网关模型列表可读取；这不等于真实对话验收。'}
+    raise Error('不支持的管理操作')
+
 def dispatch(method,args):
-    with LOCK:
-        if method in ['proactive','proactive.save','proactive.test']:
-            import proactive as p
-            if method=='proactive':return p.get()
-            if method=='proactive.save':return p.save(args)
-            return p.test(args)
-        if method in ['instructions','instructions.save','search','search.save','search.test']:
-            import workspace as w
-            if method=='instructions':return w.instructions_get()
-            if method=='instructions.save':return w.instructions_save(args)
-            if method=='search':return w.search_get()
-            if method=='search.save':return w.search_save(args)
-            if method=='search.test':return w.search_test(args)
-        if method in ['connection','sessions','calls','thinking','models.sync','session.action','routing','routing.save','media.action','model.probe','vision','vision.save','vision.probe','vision.models']:
-            import integrations as i
-            if method=='thinking':return i.thinking(args)
-            if method=='vision':return i.vision_get()
-            if method=='vision.save':return i.vision_save(args)
-            if method=='vision.probe':return i.vision_probe(args)
-            if method=='vision.models':return {'models':i.vision_models(True),'message':'已刷新网关公告支持图片的模型目录。'}
-            if method=='connection':return i.bridge('status')
-            if method=='sessions':return i.sessions()
-            if method=='calls':return i.calls(args)
-            if method=='model.probe':return i.probe(args)
-            if method=='models.sync':return i.register_models()
-            if method=='session.action':return i.session_action(args)
-            if method=='routing':return i.routing_get()
-            if method=='routing.save':return i.routing_save(args)
-            if method=='media.action':
-                if args.get('action') not in ['tag','promote','trash','restore','delete']:raise Error('图库操作无效')
-                if args.get('confirm') is not True:raise Error('需要确认图库操作')
-                index=MEDIA/'index.json'; folder=STATE/'media-revisions';folder.mkdir(mode=0o700,parents=True,exist_ok=True);shutil.copyfile(index,folder/(stamp()+'.json'))
-                result=i.bridge('media.'+args['action'],id=args.get('id'),tags=args.get('tags'),desc=args.get('desc'));audit('media.'+args['action']);return result
-        if method=='binding':
-            until=ROOT/'data/.bind-until';ids=ROOT/'data/.bind-openids'
-            if until.is_symlink() or ids.is_symlink():raise Error('绑定记录路径无效')
-            deadline=int(until.read_text().strip() or '0') if until.exists() else 0
-            captured=sorted(set(x for x in ids.read_text().splitlines() if re.fullmatch(r'[a-fA-F0-9]{32}',x))) if ids.exists() else []
-            return {'until':deadline,'active':deadline>time.time()*1000,'senders':captured}
-        if method=='binding.open':
-            if args.get('confirm') is not True:raise Error('需要确认后捕获身份')
-            run([str(ROOT/'bin/whale-ctl'),'bind-capture'],timeout=45);mark_applied();audit('binding.open');return {'message':'已关闭私聊并打开 5 分钟身份捕获。请用自己的 QQ 私聊后刷新候选列表。'}
-        if method=='binding.confirm':
-            peer=args.get('peer');ids=ROOT/'data/.bind-openids'
-            if args.get('confirm') is not True or not isinstance(peer,str) or not re.fullmatch(r'[a-fA-F0-9]{32}',peer) or ids.is_symlink() or not ids.exists() or peer not in ids.read_text().splitlines():raise Error('只能绑定你已确认的捕获身份')
-            snapshot('绑定 QQ 身份')
-            run([str(ROOT/'bin/whale-ctl'),'allow-admin',peer],timeout=45)
-            for name in ['.bind-until','.bind-openids']:
-                path=ROOT/'data'/name
-                if path.exists():path.unlink()
-            mark_applied();audit('binding.confirm');return {'message':'该 QQ 身份已绑定为私聊管理员，服务已应用新白名单。'}
-        if method=='status':return service_status()
-        if method=='overview':return overview()
-        if method=='preferences':return prefs_view()
-        if method=='preferences.add':return prefs_add(args)
-        if method=='preferences.delete':return prefs_delete(args)
-        if method=='config':return get_config()
-        if method=='config.save':return save_config(args)
-        if method=='persona.save':return persona_save(args)
-        if method=='service':return service_action(args.get('action'))
-        if method=='memory':return memory_info(args)
-        if method=='memory.forget':
-            ident=args.get('id')
-            if type(ident)!=int or ident<=0 or args.get('confirm') is not True:raise Error('请确认有效的记录编号')
-            run(['/usr/bin/python3',str(Path(__file__).with_name('server.py')),'forget',str(ident)],as_bot=True)
-            audit('memory.forget:'+str(ident));return {'message':'记录已软删除；可通过管理员备份审计恢复。'}
-        if method=='media':return media_list(args)
-        if method=='media.image':return media_image(args)
-        if method=='backups':return backups_list()
-        if method=='backup.create':
-            text=run([str(ROOT/'bin/whale-backup.sh')],timeout=90,as_bot=True)
-            admin=admin_backup();audit('backup.create');return {'message':'机器人与管理台私有备份均已生成','management':admin,'backups':backups_list()}
-        if method=='config.restore':
-            ident=str(args.get('id',''))
-            if not re.fullmatch(r'\d{8}T\d{6}-[a-f0-9]{6}',ident) or args.get('confirm') is not True:raise Error('配置快照编号无效')
-            folder=STATE/'revisions'/ident
-            if not (folder/'profile.yml').is_file():raise Error('快照不存在')
-            candidate=yaml.load((folder/'profile.yml').read_text(),Loader=Loader)
-            current_rows=load_profile();current_persona=conf(current_rows,'persona')['prefix'].encode()
-            # 与当前实际运行人格比较，绝不通过恢复快照改动人格；锁文件缺失或写入崩溃也不能绕过。
-            if digest(conf(candidate,'persona')['prefix'].encode())!=digest(current_persona):raise Error('快照人格与当前人格不一致，拒绝恢复')
-            restore_credentials=args.get('restoreCredentials') is True
-            if not restore_credentials:
-                current_qq=conf(current_rows,'im-qqbot');restored_qq=conf(candidate,'im-qqbot')
-                snapshot_env=dict(l.split('=',1) for l in (folder/'qqbot.env').read_text().splitlines() if '=' in l and not l.startswith('#')) if (folder/'qqbot.env').exists() else {}
-                if snapshot_env.get('QQBOT_APPID')!=envvalues().get('QQBOT_APPID'):
-                    restored_qq['access']=copy.deepcopy(current_qq['access'])
-                    restored_qq.setdefault('groupAdmin',{})['owners']=copy.deepcopy(current_qq.get('groupAdmin',{}).get('owners',[]))
-                restored_qq['appId']='__FROM_ENV__';restored_qq['appSecret']='__FROM_ENV__'
-            revision=snapshot('恢复前备份')
-            # Routine settings rollback must not revive a revoked QQ/API key.
-            atomic(PROFILE,yaml.dump(candidate,Dumper=Dumper,allow_unicode=True,sort_keys=False,width=100000).encode())
-            for n,pth in [('memory.json',MEMCFG),('chat-delivery.json',CHATFILE),*([('qqbot.env',ENVFILE)] if restore_credentials else [])]:
-                if (folder/n).exists():atomic(pth,(folder/n).read_bytes())
-            audit('config.restore');return {'message':'配置已恢复，当前凭据保留。点击应用配置后生效。' if not restore_credentials else '配置与所选快照凭据已恢复，请确认平台密钥仍有效后应用。','backup':revision,'config':get_config()}
-        if method=='logs':
-            logs=[]
-            for name in ['dsh.log','dsh.err.log']:
-                path=ROOT/'logs'/name
-                if path.exists():
-                    with path.open('rb') as f:f.seek(max(0,path.stat().st_size-24000));text=f.read().decode('utf-8','replace')
-                    logs.append({'name':name,'text':redact('\n'.join(text.splitlines()[-90:]))})
-            auditpath=STATE/'audit.jsonl'
-            return {'logs':logs,'audit':auditpath.read_text()[-16000:] if auditpath.exists() else ''}
-        if method=='models':
-            p=get_config()['model'];e=envvalues()
-            # Endpoint is fixed to the configured gateway, never supplied by an HTTP request.
-            expected=(os.environ.get('WHALE_API_BASE') or 'https://api.example.com/v1').rstrip('/')
-            if p['baseURL'].rstrip('/')!=expected:raise Error('模型网关地址不在配置范围')
-            req=urllib.request.Request(p['baseURL']+'/models',headers={'Authorization':'Bearer '+e.get('WHALE_API_KEY','')})
-            with urllib.request.urlopen(req,timeout=15) as r:x=json.load(r)
-            data=[{k:m.get(k) for k in ['id','name','routing_name','context_length','max_output_tokens']} for m in x.get('data',[])]
-            return {'models':data,'message':'网关模型列表可读取；这不等于真实对话验收。'}
-        raise Error('不支持的管理操作')
+    if method in MUTATING_METHODS:
+        with LOCK:
+            return _dispatch_unlocked(method,args)
+    return _dispatch_unlocked(method,args)
 
 def admin_backup():
     import tarfile
     out=STATE/'backups';out.mkdir(parents=True,exist_ok=True,mode=0o700)
     name='admin-'+stamp()+'.tar.gz';tmp=out/('.'+name);target=out/name
-    selected=[AUTHFILE]
+    selected=[]
+    if AUTHFILE.is_file() and not AUTHFILE.is_symlink():selected.append(AUTHFILE)
     for name_ in ['audit.jsonl','probes.jsonl','applied.json','revisions','routing-revisions','media-revisions','vision-revisions','vision-catalog.json','vision-probes.jsonl','instruction-revisions','search-revisions','proactive-revisions','persona-lock.json','persona-revisions','persona-prefs-revisions']:
         p=STATE/name_
-        if p.is_file():selected.append(p)
+        if p.is_file() and not p.is_symlink():selected.append(p)
         elif p.is_dir() and not p.is_symlink():selected.extend(f for f in p.rglob('*') if f.is_file() and not f.is_symlink())
     with tarfile.open(tmp,'w:gz') as archive:
         for p in selected:
             if not p.is_file() or p.is_symlink():raise Error('管理备份路径无效')
-            arc='web/auth.json' if p==selected[0] else 'broker/'+str(p.relative_to(STATE))
+            arc='web/auth.json' if p==AUTHFILE else 'broker/'+str(p.relative_to(STATE))
             archive.add(p,arcname=arc,recursive=False)
     os.chmod(tmp,0o600);os.replace(tmp,target)
     for old in sorted(out.glob('admin-*.tar.gz'),key=lambda p:p.stat().st_mtime_ns,reverse=True)[7:]:old.unlink()

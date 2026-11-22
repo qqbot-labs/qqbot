@@ -4,14 +4,22 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import fcntl,hashlib,json,os,re,stat,shutil,subprocess,time,urllib.request,urllib.error,sys
 ROOT=Path(os.environ.get('WHALE_ROOT','/home/qqwhale/whale'))
+DSH=Path(os.environ.get('DSH_HOME','/home/qqwhale/.dsh'))
 POLICY=ROOT/'etc/proactive.json';DATA=ROOT/'data/qqwhale';STATE=DATA/'proactive-state.json';EVENTS=DATA/'proactive-events.jsonl'
 TZ=ZoneInfo('Asia/Shanghai')
 DEFAULT={'enabled':False,'appId':'','peer':'','idleMinutes':0,'intervalMinutes':0,'decisionIntervalMinutes':0,'quietStart':'00:00','quietEnd':'00:00','mode':'ai','text':'想起你啦，过来打个招呼。忙的话不用急着回我。'}
 
 def config():
- raw=json.loads(POLICY.read_text()) if POLICY.exists() else {}
+ try:
+  raw=json.loads(POLICY.read_text()) if POLICY.exists() else {}
+  if not isinstance(raw,dict):raw={}
+ except (OSError,ValueError):raw={}
  return {**DEFAULT,**{k:v for k,v in raw.items() if k in DEFAULT or k=='appId'}}
-def envvalues():return dict(l.split('=',1) for l in (ROOT/'etc/qqbot.env').read_text().splitlines() if '=' in l and not l.startswith('#'))
+def envvalues():
+ path=ROOT/'etc/qqbot.env'
+ try:text=path.read_text() if path.exists() else ''
+ except OSError:return {}
+ return dict(l.split('=',1) for l in text.splitlines() if '=' in l and not l.startswith('#'))
 def atomic(path,obj):
  path.parent.mkdir(parents=True,exist_ok=True);tmp=path.with_name('.'+path.name+'.'+str(os.getpid()))
  fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -32,7 +40,11 @@ def read_private(path,limit):
   return f.read(limit)
 def state():
  raw=read_private(STATE,65536)
- return json.loads(raw) if raw else {}
+ if not raw:return {}
+ try:
+  parsed=json.loads(raw)
+  return parsed if isinstance(parsed,dict) else {}
+ except ValueError:return {}
 
 def record(entry):
  DATA.mkdir(parents=True,exist_ok=True)
@@ -129,7 +141,11 @@ def format_chat(text):
 
 def _persona_context():
  import yaml
- e=envvalues();rows=yaml.safe_load(Path('/home/qqwhale/.dsh/profiles/web/cordis.patch.yml').read_text())
+ import domain as d
+ e=envvalues()
+ profile_path=DSH/'profiles/web/cordis.patch.yml'
+ loader=getattr(d,'Loader',None) or yaml.SafeLoader
+ rows=yaml.load(profile_path.read_text(),Loader=loader)
  def walk(x):
   if isinstance(x,list):
    for v in x:yield from walk(v)
@@ -140,15 +156,18 @@ def _persona_context():
  persona=configs['persona']['prefix'];model=configs['agent-default-model']['model']
  info=bridge('proactive.meta');model=info.get('model',{}).get('model') or model;sid=info.get('sessionId');recent=[]
  if sid:
-  raw=subprocess.check_output(['/usr/bin/node','/opt/whale-admin/read-events.mjs','messages',sid],timeout=20,text=True)
+  raw=subprocess.check_output([shutil.which('node') or '/usr/bin/node',str(Path(__file__).with_name('read-events.mjs')),'messages',sid],timeout=20,text=True,env={**os.environ,'DSH_HOME':str(DSH)})
   recent=[{'role':x['role'],'content':x['text'][:800]} for x in json.loads(raw).get('messages',[])[-8:] if x['text'].strip()]
- instructions=(ROOT/'workspace/AGENTS.md').read_text()
+ agents_path=ROOT/'workspace/AGENTS.md'
+ instructions=agents_path.read_text() if agents_path.exists() else ''
  profile_path=ROOT/'data/qqwhale/persona-preferences.json'
  if profile_path.exists():
-  profile=json.loads(profile_path.read_text())
-  active=[{'id':x.get('id'),'kind':x.get('kind','preference'),'key':x.get('key',''),'text':x['text']} for x in profile.get('items',[]) if x.get('text')]
-  instructions+='\n【当前长期熟悉档案，最新值优先】\n'+json.dumps(active,ensure_ascii=False)
-  instructions+='\n【已撤销主题，不从旧聊天恢复】'+json.dumps([x['key'] for x in profile.get('revoked',[]) if x.get('key')],ensure_ascii=False)
+  try:profile=json.loads(profile_path.read_text())
+  except (OSError,ValueError):profile={}
+  if isinstance(profile,dict):
+   active=[{'id':x.get('id'),'kind':x.get('kind','preference'),'key':x.get('key',''),'text':x['text']} for x in profile.get('items',[]) if isinstance(x,dict) and x.get('text')]
+   instructions+='\n【当前长期熟悉档案，最新值优先】\n'+json.dumps(active,ensure_ascii=False)
+   instructions+='\n【已撤销主题，不从旧聊天恢复】'+json.dumps([x['key'] for x in profile.get('revoked',[]) if isinstance(x,dict) and x.get('key')],ensure_ascii=False)
  return e,persona,model,recent,instructions
 
 def generate_ai(c):
@@ -156,7 +175,7 @@ def generate_ai(c):
  e,persona,model,recent,instructions=_persona_context()
  prompt='这是后台主动关心任务，不是用户新发言。请延续人格、结合下方近期对话，主动发一句轻松自然的关心或分享。像熟悉的QQ朋友随口接话，一句够了就停；两个独立意思用空行分开。不凑字数，不反复追问、不制造焦虑、不声称观察到现实情况、不要求用户立即回复、不提后台或定时任务、不输出工具控制标记。只输出要发送的正文。\n北京时间：'+datetime.now(TZ).strftime('%Y-%m-%d %H:%M')+'\n近期对话仅供背景：'+json.dumps(recent,ensure_ascii=False)
  api_base=(e.get('WHALE_API_BASE') or 'https://api.example.com/v1').rstrip('/')
- start=time.time();out=post(api_base+'/chat/completions',{'model':model,'messages':[{'role':'system','content':persona+'\n\n'+instructions},{'role':'user','content':prompt}],'max_tokens':4096,'stream':False,'thinking':{'type':'disabled'},'reasoning_effort':'low'},{'Authorization':'Bearer '+e['WHALE_API_KEY']},timeout=60)
+ start=time.time();out=post(api_base+'/chat/completions',{'model':model,'messages':[{'role':'system','content':persona+'\n\n'+instructions},{'role':'user','content':prompt}],'max_tokens':4096,'stream':False,'thinking':{'type':'disabled'}},{'Authorization':'Bearer '+e['WHALE_API_KEY']},timeout=60)
  text=out.get('choices',[{}])[0].get('message',{}).get('content','')
  if not isinstance(text,str) or not text.strip():raise RuntimeError('模型未返回正文')
  text=normalize_chat_text(text).strip()
@@ -169,7 +188,7 @@ def decide_and_generate(c,s,last):
  stats=habit_stats(c['peer']);habits=habit_summary(stats,last,s)
  prompt='这是后台主动关心调度，不是用户新发言。请结合当前北京时间、用户过去30天的主动聊天习惯、近期对话、上次主动消息后的反馈，判断此刻是否适合主动发一条QQ消息。不存在每日次数、夜间或静默天数限制；根据近期对话和具体话题判断有没有自然想说的话，不按打卡凑消息，不仅凭沉默就假定对方不想聊。如果适合，延续人格随口说一句，两个独立意思用空行分开，不凑字数，不劝睡、不说教、不制造焦虑、不要求立即回复、不声称观察到现实、不提后台或定时任务。\n只输出严格JSON，不要markdown：{"send":true或false,"reason":"一句内部判断理由","text":"适合时发送的正文，不适合时为空字符串"}。\n当前：'+datetime.now(TZ).strftime('%Y-%m-%d %H:%M %A')+'\n习惯摘要：'+habits+'\n上次主动消息（勿重复发送）：'+str(s.get('lastText') or '')+'\n近期对话仅供背景：'+json.dumps(recent,ensure_ascii=False)
  api_base=(e.get('WHALE_API_BASE') or 'https://api.example.com/v1').rstrip('/')
- start=time.time();out=post(api_base+'/chat/completions',{'model':model,'messages':[{'role':'system','content':persona+'\n\n'+instructions},{'role':'user','content':prompt}],'max_tokens':800,'stream':False,'thinking':{'type':'disabled'},'reasoning_effort':'low'},{'Authorization':'Bearer '+e['WHALE_API_KEY']},timeout=60)
+ start=time.time();out=post(api_base+'/chat/completions',{'model':model,'messages':[{'role':'system','content':persona+'\n\n'+instructions},{'role':'user','content':prompt}],'max_tokens':800,'stream':False,'thinking':{'type':'disabled'}},{'Authorization':'Bearer '+e['WHALE_API_KEY']},timeout=60)
  raw=out.get('choices',[{}])[0].get('message',{}).get('content','')
  if not isinstance(raw,str) or not raw.strip():raise RuntimeError('主动判断未返回正文')
  clean=re.sub(r'^```(?:json)?\s*|\s*```$','',raw.strip(),flags=re.I)
@@ -206,6 +225,8 @@ def tick(manual=False,preview=False):
    text,usage=generate(c);text=normalize_chat_text(text);return {'status':'preview','text':text,'generation':usage}
   key=c['appId']+':'+c['peer'];day=datetime.fromtimestamp(now,TZ).strftime('%Y-%m-%d')
   if s.get('target')!=key:s={}
+  if not manual and s.get('status')=='unknown' and last<=float(s.get('attemptInboundAt') or 0):
+   return {'status':'skipped','reason':'上一条主动消息发送结果未知且尚未收到对方新消息，暂缓自动重发'}
   if manual:
    text,usage=generate(c);why='手动测试'
   else:
@@ -220,8 +241,6 @@ def tick(manual=False,preview=False):
     s.update(target=key,day=day,lastDecision=now,lastDecisionReason=why,status='deferred');atomic(STATE,s)
     record({'status':'deferred','appId':c['appId'],'peer':c['peer'],'reason':why,'manual':False})
     return {'status':'skipped','reason':'主动判断暂不发送：'+why}
-  if not manual and s.get('status')=='unknown' and text==s.get('lastPlannedText') and last<=float(s.get('attemptInboundAt') or 0):
-   return {'status':'skipped','reason':'上一条相同消息结果未知，不自动重发原文'}
   s.update(lastPlannedText=text,attemptInboundAt=last,target=key,day=day,attempts=(s.get('attempts',0) if s.get('day')==day else 0)+1,lastAttempt=now,lastDecision=now,lastDecisionReason=why,status='preparing')
   # Commit attempt before network; crash/timeout never produces automatic resend.
   atomic(STATE,s)
@@ -239,7 +258,10 @@ def tick(manual=False,preview=False):
     if index:
      time.sleep(formatted['delays'][index-1]/1000)
     if config()!=c or last_inbound(c['peer'])>last or bridge('proactive.meta').get('busy'):
-     s.update(status='interrupted',lastSent=time.time(),lastText='\n\n'.join(sent_parts));atomic(STATE,s)
+     patch={'status':'interrupted'}
+     if sent_parts:
+      patch['lastSent']=time.time();patch['lastText']='\n\n'.join(sent_parts)
+     s.update(**patch);atomic(STATE,s)
      record({'status':'interrupted','sentParts':len(sent_parts),'totalParts':len(formatted['messages'])})
      return {'status':'interrupted','sentParts':len(sent_parts),'message':'分条发送期间收到新消息或配置变化，剩余内容未发送。'}
     s['status']='sending';atomic(STATE,s)
@@ -265,11 +287,14 @@ if __name__=='__main__':
 # Privileged GUI policy management; never called by the unprivileged tick entry point.
 def get():
  import domain as d,integrations as i
- c=config();s=state();peers=i.bridge('status')['peers'];current=d.envvalues().get('QQBOT_APPID')
+ c=config();s=state()
+ try:peers=i.bridge('status').get('peers',[])
+ except Exception:peers=[]
+ current=d.envvalues().get('QQBOT_APPID','')
  last=last_inbound(c['peer']) if c['peer'] else 0
  stats=habit_stats(c['peer']) if c['peer'] else {}
  reason=due(c,s,last) if c['peer'] and c['appId']==current else '目标未配置或属于其他AppID'
- return {'config':c,'revision':hashlib.sha256(POLICY.read_bytes()).hexdigest() if POLICY.exists() else 'missing','state':s,'reason':reason or '下次检查可评估','peers':[{'peer':p['peer'],'lastActivity':p.get('lastActivity')} for p in peers if p['scope']=='c2c'],'currentAppId':current,'events':read_events(),'timezone':'Asia/Shanghai','checkEveryMinutes':5,'habit':habit_summary(stats,last,s) if stats else '尚未选择联系对象','habitStats':{k:v for k,v in stats.items() if k in ('total','days','recent7','currentHour','currentWindow','sameWeekdayWindow')} if stats else {}}
+ return {'config':c,'revision':hashlib.sha256(POLICY.read_bytes()).hexdigest() if POLICY.exists() else 'missing','state':s,'reason':reason or '下次检查可评估','peers':[{'peer':p['peer'],'lastActivity':p.get('lastActivity')} for p in peers if p.get('scope')=='c2c'],'currentAppId':current,'events':read_events(),'timezone':'Asia/Shanghai','checkEveryMinutes':5,'habit':habit_summary(stats,last,s) if stats else '尚未选择联系对象','habitStats':{k:v for k,v in stats.items() if k in ('total','days','recent7','currentHour','currentWindow','sameWeekdayWindow')} if stats else {}}
 
 def save(body):
  import domain as d,integrations as i
