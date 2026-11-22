@@ -95,9 +95,13 @@ class AdminFixesTests(unittest.TestCase):
         d.CHATFILE.write_text('{"shortLimit":40}\n')
 
         yaml_mod = d.yaml if d.yaml is not None else _JsonYamlShim
+        fake_js_yaml = lambda args, input=None, **kw: json.dumps(
+            yaml_mod.load(input, Loader=getattr(d, 'Loader', None)) if d.yaml is not None else yaml_mod.load(input),
+            ensure_ascii=False,
+        )
         with patch.object(d, 'yaml', yaml_mod), \
              patch.object(d, 'atomic', side_effect=self._local_atomic), \
-             patch.object(d, 'run', side_effect=lambda args, input=None, **kw: input):
+             patch.object(d, 'run', side_effect=fake_js_yaml):
             cfg = d.get_config()
             self.assertEqual(cfg['revision'], d.profile_revision(d.PROFILE.read_bytes()))
             res = d.persona_save({
