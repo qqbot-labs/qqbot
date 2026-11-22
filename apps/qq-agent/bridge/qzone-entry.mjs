@@ -9432,6 +9432,7 @@ function createBridge({ client: client2, handler: handler2, token: token2, data:
       }
     }
     if (req.method !== "POST") return send(405, { reason: "method_not_allowed" });
+    let body;
     try {
       const buffers = [];
       let size = 0;
@@ -9440,8 +9441,12 @@ function createBridge({ client: client2, handler: handler2, token: token2, data:
         if (size > 65536) return send(413, { reason: "too_large" });
         buffers.push(chunk);
       }
-      const body = buffers.length ? JSON.parse(Buffer.concat(buffers).toString("utf8")) : {};
-      if (!body || Array.isArray(body) || typeof body !== "object") return send(400, { reason: "invalid_body" });
+      body = buffers.length ? JSON.parse(Buffer.concat(buffers).toString("utf8")) : {};
+    } catch {
+      return send(400, { reason: "invalid_json" });
+    }
+    if (!body || Array.isArray(body) || typeof body !== "object") return send(400, { reason: "invalid_body" });
+    try {
       if (action === "logout") {
         if (qrRunning) return send(409, { reason: "login_in_progress" });
         invalidate();
@@ -9485,7 +9490,7 @@ function createBridge({ client: client2, handler: handler2, token: token2, data:
       if (!reads.has(action) && !writes.has(action)) return send(404, { reason: "action_not_allowed" });
       if (action === "check_cookie") {
         await verify();
-        return send(200, { status: "ok", retcode: 0, data: { valid: true } });
+        return send(200, { status: "ok", retcode: 0, data: { valid: true, qq: client2.qqNumber ?? null } });
       }
       if (!online()) await verify();
       const result = await handler2.handle(action, body);

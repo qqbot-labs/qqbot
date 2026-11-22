@@ -26,11 +26,18 @@ class Store:
             CREATE TABLE IF NOT EXISTS memories(id INTEGER PRIMARY KEY,friend TEXT NOT NULL,kind TEXT NOT NULL,body TEXT NOT NULL,source TEXT NOT NULL,label TEXT NOT NULL,created REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS memory_friend ON memories(friend,kind);
             CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,channel TEXT NOT NULL,friend TEXT NOT NULL,body TEXT NOT NULL,created REAL NOT NULL,state TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS events_state_channel_created ON events(state,channel,created);
+            CREATE INDEX IF NOT EXISTS events_channel_friend_state_created ON events(channel,friend,state,created);
             CREATE TABLE IF NOT EXISTS ledger(id TEXT PRIMARY KEY,event TEXT UNIQUE,channel TEXT NOT NULL,friend TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,detail TEXT NOT NULL,created REAL NOT NULL,updated REAL NOT NULL,proactive INTEGER NOT NULL,test INTEGER NOT NULL DEFAULT 0);
+            CREATE INDEX IF NOT EXISTS ledger_status_updated ON ledger(status,updated);
+            CREATE INDEX IF NOT EXISTS ledger_friend_action_status_updated ON ledger(friend,action,status,updated);
             CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY,friend TEXT NOT NULL,action TEXT NOT NULL,result TEXT NOT NULL,detail TEXT NOT NULL,created REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS logs_created ON logs(created);
             CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY,model TEXT NOT NULL,input INTEGER,output INTEGER,cost REAL,created REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS usage_created ON usage(created);
             CREATE TABLE IF NOT EXISTS tasks(name TEXT PRIMARY KEY,next REAL NOT NULL,last REAL,failures INTEGER NOT NULL DEFAULT 0,detail TEXT NOT NULL DEFAULT '尚未运行');
             CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,csrf TEXT NOT NULL,expires REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires);
             ''')
             usage_columns = {row['name'] for row in c.execute('PRAGMA table_info(usage)')}
             for column in ('reserved_tokens', 'reserved_cost'):

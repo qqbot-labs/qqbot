@@ -14,7 +14,8 @@ async function fixture(run,overrides={}){
  await new Promise(resolve=>bridge.server.listen(0,'127.0.0.1',resolve));
  const url='http://127.0.0.1:'+bridge.server.address().port;
  async function call(action,method='GET',body,auth=true){return fetch(url+'/'+action,{method,headers:{...(auth?{authorization:'Bearer '+token}:{}),'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)})}
- try{await run({call,client,data,time:(v)=>clock=v})}finally{bridge.close();fs.rmSync(data,{recursive:true,force:true})}
+ async function rawCall(action,method='POST',rawBody='{bad'){return fetch(url+'/'+action,{method,headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:rawBody})}
+ try{await run({call,rawCall,client,data,time:(v)=>clock=v})}finally{bridge.close();fs.rmSync(data,{recursive:true,force:true})}
 }
 test('requires auth; cached uin does not prove online',()=>fixture(async({call})=>{
  assert.equal((await call('health','GET',undefined,false)).status,401);
@@ -51,4 +52,19 @@ test('body shape and action whitelist enforced',()=>fixture(async({call})=>{
  assert.equal((await call('get_friend_feeds','POST',[])).status,400);
  assert.equal((await call('delete_msg','POST',{})).status,404);
  assert.equal((await call('send_like','GET')).status,405);
+}));
+test('check_cookie returns qq number and malformed JSON returns 400 without invalidating session',()=>fixture(async({call,rawCall,data})=>{
+ const checkRes=await call('check_cookie','POST',{});
+ assert.equal(checkRes.status,200);
+ const checkBody=await checkRes.json();
+ assert.equal(checkBody.data.valid,true);
+ assert.equal(checkBody.data.qq,'10001');
+ assert.equal((await (await call('health')).json()).ok,true);
+ fs.writeFileSync(path.join(data,'qrcode.png'),Buffer.from([137,80,78,71,13,10,26,10]));
+ const bad=await rawCall('get_friend_feeds','POST','{not-valid-json');
+ assert.equal(bad.status,400);
+ assert.equal((await bad.json()).reason,'invalid_json');
+ // Session must remain online and QR file untouched on client 400 JSON parse error!
+ assert.equal((await (await call('health')).json()).ok,true);
+ assert.equal(fs.existsSync(path.join(data,'qrcode.png')),true);
 }));

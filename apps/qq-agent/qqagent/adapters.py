@@ -136,7 +136,8 @@ async def image_data(raw, max_bytes=5*1024*1024):
         data = b''.join(chunks)
         mime = ('image/png' if data.startswith(b'\x89PNG\r\n\x1a\n') else
                 'image/jpeg' if data.startswith(b'\xff\xd8\xff') else
-                'image/gif' if data.startswith((b'GIF87a', b'GIF89a')) else None)
+                'image/gif' if data.startswith((b'GIF87a', b'GIF89a')) else
+                'image/webp' if len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP' else None)
         if not mime:
             raise Rejected('图片实际类型不支持')
         return 'data:' + mime + ';base64,' + base64.b64encode(data).decode()
@@ -171,6 +172,17 @@ def segments(raw):
         out.append({'type': 'text', 'data': {'text': raw[position:]}})
     return out
 
+def _strip_image_payloads(obj):
+    """Replace inline base64 data:image/ URLs with a fixed token before measuring text context chars."""
+    if isinstance(obj, str):
+        return '[image]' if obj.startswith('data:image/') else obj
+    if isinstance(obj, list):
+        return [_strip_image_payloads(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _strip_image_payloads(v) for k, v in obj.items()}
+    return obj
+
+
 class ModelClient:
     def __init__(self,store):self.store=store;self.lock=asyncio.Lock()
     async def complete(self,messages,kind='model',test=False):
@@ -179,8 +191,8 @@ class ModelClient:
         cfg=self.store.config();model=cfg.model if kind=='model' else cfg.vision_model if kind=='vision' else cfg.judge_model
         key=self.store.secret(kind+'_key')
         if not key or not model.base_url or not model.name:raise Rejected('模型未配置')
-        # Limit entire serialized context before upload; no unrelated friend is ever retrieved.
-        if len(json.dumps(messages,ensure_ascii=False))>model.context_limit*3:raise Rejected('上下文超过配置上限')
+        # Limit entire serialized text context before upload; exclude base64 image pixels (bounded by image_data).
+        if len(json.dumps(_strip_image_payloads(messages),ensure_ascii=False))>model.context_limit*3:raise Rejected('上下文超过配置上限')
         start=__import__('datetime').datetime.now(__import__('zoneinfo').ZoneInfo(cfg.policy.timezone)).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
         usage=self.store.day_usage(start)
         # Immutable reservations prevent missing usage, failure or model changes from erasing spend.

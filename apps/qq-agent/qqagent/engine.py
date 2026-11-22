@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import re
 import sqlite3
 import uuid
 from datetime import datetime
@@ -21,7 +22,13 @@ class Engine:
         self.versions = versions
         self.send_lock = asyncio.Lock()
         self.decide_lock = asyncio.Lock()
+        self.poll_lock = asyncio.Lock()
         self.stopping = False
+
+    def freshness_window(self, channel):
+        if channel == 'qzone':
+            return max(300, self.s.config().qzone.poll_minutes * 60 * 2)
+        return 300
 
     def day(self):return datetime.now(ZoneInfo(self.s.config().policy.timezone)).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
     def permitted(self,friend,action):
@@ -177,7 +184,8 @@ class Engine:
         if stamp is None:
             raise ValueError('事件时间缺失或无效，拒绝自动处理')
         identity = channel + ':' + str(eid)
-        state = 'pending' if now() - 300 < stamp <= now() + 60 else 'baseline'
+        window = self.freshness_window(channel)
+        state = 'pending' if now() - window < stamp <= now() + 60 else 'baseline'
         # Only a complete poll commits the first-run baseline; ingest never releases it.
         if channel == 'qzone' and not self.s.get('qzone_baseline'):
             state = 'baseline'
@@ -228,8 +236,10 @@ class Engine:
             cfg = self.s.config()
             if self.s.get('stop_all') or not self.s.get('social_running') or not cfg.policy.enabled or not self.s.active_persona():
                 return
+            qzone_window = self.freshness_window('qzone')
             with self.s.db() as c:
-                c.execute("UPDATE events SET state='expired' WHERE state='pending' AND (created<? OR created>?)", (now()-300, now()+60))
+                c.execute("UPDATE events SET state='expired' WHERE state='pending' AND channel='qq' AND (created<? OR created>?)", (now()-300, now()+60))
+                c.execute("UPDATE events SET state='expired' WHERE state='pending' AND channel='qzone' AND (created<? OR created>?)", (now()-qzone_window, now()+60))
             groups = {}
             for event in self.s.rows("SELECT * FROM events WHERE state='pending' AND created<? ORDER BY created LIMIT 100", (now()-2,)):
                 groups.setdefault((event['channel'], event['friend']), []).append(event)
@@ -294,7 +304,9 @@ class Engine:
         if cfg.tools.search:
             messages.append({'role': 'system', 'content': '联网检索：需要实时或你不确定的信息时，只输出 JSON {"search":"查询词"}（查询词不超过 100 字），不要输出其他内容；收到检索结果后再回答。不需要检索则正常回答。'})
         messages.append({'role': 'user', 'content': content or '[无可处理文本]'})
-        text = await self.model.complete(messages, 'vision' if cfg.tools.vision and cfg.vision_model.name else 'model')
+        has_image = any(part.get('type') == 'image_url' for part in content)
+        model_kind = 'vision' if (has_image and cfg.tools.vision and cfg.vision_model.name) else 'model'
+        text = await self.model.complete(messages, model_kind)
         requested = self._search_request(text) if cfg.tools.search else None
         if requested:
             try:
@@ -306,7 +318,8 @@ class Engine:
             if not self.current(context, sources=ids):
                 self.finish(items, 'expired')
                 return
-            text = await self.model.complete(messages, 'model')
+            # Keep vision routing when messages contain image_url so text-only models never receive image blocks.
+            text = await self.model.complete(messages, model_kind)
             if self._search_request(text):
                 text = '<SKIP>'
         with self.s.lock:
@@ -326,6 +339,21 @@ class Engine:
                 self.finish(items, 'processed')
             else:
                 self.finish(items, 'expired')
+
+    @staticmethod
+    def _parse_json_object(raw):
+        clean = str(raw or '').strip()
+        clean = re.sub(r'^```(?:json)?\s*|\s*```$', '', clean, flags=re.I).strip()
+        try:
+            value = json.loads(clean)
+        except (ValueError, TypeError):
+            start, end = clean.find('{'), clean.rfind('}')
+            if start < 0 or end <= start:
+                raise ValueError('模型决策不是有效 JSON') from None
+            value = json.loads(clean[start:end + 1])
+        if not isinstance(value, dict):
+            raise ValueError('模型决策结构无效')
+        return value
 
     @staticmethod
     def _search_request(text):
@@ -377,14 +405,16 @@ class Engine:
             if not actions or all(self.gate({'channel': 'qzone', 'action': a, 'friend': friend, 'test': 0, 'proactive': 1}) for a in actions):
                 self.finish([item], 'skipped')
                 continue
+            persona = self.s.active_persona()
+            if not persona:
+                self.finish([item], 'expired')
+                return
             # This path never reads private histories or memories.
             answer = await self.model.complete([
-                {'role': 'system', 'content': self.s.active_persona()['body'] + '\n公开空间场景：只根据公开动态决定行动，不引用私聊，可不行动。只输出 JSON，like 为布尔值，comment 为字符串，不评论则为空。'},
+                {'role': 'system', 'content': persona['body'] + '\n公开空间场景：只根据公开动态决定行动，不引用私聊，可不行动。只输出 JSON，like 为布尔值，comment 为字符串，不评论则为空。'},
                 {'role': 'user', 'content': str(event.get('text') or event.get('raw_message') or '')[:6000]},
             ])
-            decision = json.loads(answer)
-            if not isinstance(decision, dict):
-                raise ValueError('模型决策结构无效')
+            decision = self._parse_json_object(answer)
             candidates = []
             if can_like and decision.get('like') is True:
                 candidates.append(('like', {'user_id': int(friend), 'tid': tid}))

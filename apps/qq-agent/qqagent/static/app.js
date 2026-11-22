@@ -329,7 +329,7 @@ const views = {
       try {
         const result = await api('test-send', 'POST', {text, request_id: crypto.randomUUID()});
         target.textContent = `结果：${result.status || '未知'}\n说明：${result.detail || '后端未提供说明'}`;
-        testSendUncertain = !['sent', 'blocked', 'cancelled', 'failed'].includes(result.status);
+        testSendUncertain = !['success', 'blocked', 'cancelled', 'failed'].includes(result.status);
       } catch (error) { testSendUncertain = true; target.textContent = '发送结果未知：' + error.message; throw error; }
       finally { if (testSendUncertain) { $('#test-send').dataset.keepDisabled = 'true'; target.textContent += '\n已禁止本会话再次发送，请先核对账本和主人接收情况。'; } }
     });
@@ -616,6 +616,7 @@ const views = {
     $('#main').innerHTML = heading('系统与备份', '配置持久化、可恢复、默认安全暂停。') +
       `<section class="card" data-section="policy"><h2>社交与预算策略</h2><p class="muted">每日次数、Token、费用预算及冷却设为0表示不限制；保留天数设为0表示不自动删除。检查间隔是调度周期，不限制每日次数。</p>${check('social-enabled', '显式启用正式社交（仍需人格、渠道和好友许可）', policy.enabled)}${check('quiet-reply', '安静时段允许被动回复', policy.reply_in_quiet)}<div class="form-grid">${field('timezone', '时区', policy.timezone)}${Object.entries(numbers).map(([key, [title, min, max, integer]]) => field('policy-' + key, title, policy[key], 'number', '', `min="${min}" ${max==null?'':`max="${max}"`} step="${integer === false ? 'any' : '1'}"`)).join('')}</div><div class="actions"><button id="save-policy" class="primary">保存策略</button></div></section>
       <section class="card"><h2>项目备份与恢复</h2><p class="muted">备份包含配置、人格、私人记忆、调度和发送账本，不含密钥/Cookie。本项目备份不替代 VPS 整机备份；导出文件仍须妥善保护。</p><div class="actions"><button id="backup">下载项目备份</button><button id="diagnostics">导出脱敏诊断</button></div><label for="restore-file">选择备份 JSON</label><input id="restore-file" class="file-input" type="file" accept=".json"><div class="actions"><button id="restore" class="danger">校验并恢复（恢复后全部暂停）</button></div><p class="field-note">恢复会替换当前数据，后端校验通过后才执行。恢复后须重新登录；原密钥不从此备份还原，历史任务不补发。</p></section>
+      <section class="card" data-section="password"><h2>管理密码</h2><p class="muted">纯中文至少 3 个汉字，其他密码至少 6 个字符；修改后其他浏览器会话会立即失效。</p><div class="form-grid">${field('old-password', '当前密码', '', 'password', '', 'autocomplete="current-password" maxlength="200"')}${field('new-password', '新密码', '', 'password', '', 'autocomplete="new-password" maxlength="200"')}</div><div class="actions"><button id="change-password" class="primary">更新管理密码</button></div></section>
       <section class="card"><h2>后台任务</h2>${table(['任务', '下次运行', '最近运行', '失败次数', '最近结果'], (status.tasks || []).map(t => [esc(t.name), esc(fmt(t.next)), esc(fmt(t.last)), esc(t.failures), esc(t.detail)]), '暂无任务记录，不能据此认定后台调度已运行。')}<p class="field-note">当前接口未提供任务耗时；不展示虚构的耗时或预算使用值。</p></section>`;
     on('save-policy', async () => {
       const next = draftConfig(); next.policy.enabled = $('#social-enabled').checked; next.policy.reply_in_quiet = $('#quiet-reply').checked; next.policy.timezone = $('#timezone').value.trim();
@@ -625,6 +626,14 @@ const views = {
     });
     on('backup', () => download('backup', 'qq-agent-backup.json'));
     on('diagnostics', () => download('diagnostics', 'qq-agent-diagnostics.json'));
+    on('change-password', async () => {
+      const old = $('#old-password').value, password = $('#new-password').value;
+      if (!old || !password) throw Error('请填写当前密码和新密码。');
+      const result = await api('password', 'POST', {old, password});
+      $('#old-password').value = ''; $('#new-password').value = '';
+      markClean('password');
+      toast(result.message || '管理密码已修改，其他登录会话已失效。');
+    });
     on('restore', async () => {
       const file = $('#restore-file').files[0];
       if (!file) throw Error('请先选择备份文件。');
