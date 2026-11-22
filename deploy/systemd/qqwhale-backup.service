@@ -17,7 +17,8 @@ ProtectHome=read-only
 PrivateTmp=yes
 PrivateDevices=yes
 RestrictNamespaces=yes
-ReadWritePaths=/home/qqwhale/whale/backups
+# Allow backups output plus data/qqwhale so SQLite WAL online backup & checkpoint can coordinate -shm locks.
+ReadWritePaths=/home/qqwhale/whale/backups /home/qqwhale/whale/data/qqwhale
 BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
 StandardInput=data
 StandardInputData=AA==

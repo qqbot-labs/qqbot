@@ -20,10 +20,39 @@ export function validate(name,args){
  const count=args.max_chars??16000;if(!Number.isInteger(count)||count<1)throw Error('max_chars应为正整数');
  const url=publicURL(args.url);return {url:url.href,max_chars:count};
 }
+const DEFAULT_MAX_RESPONSE_BYTES=16*1024*1024;
+function expandIPv6(ip){
+ if(ip.includes('.'))return null;
+ const halves=ip.split('::');
+ if(halves.length>2)return null;
+ const left=halves[0]?halves[0].split(':'):[];
+ const right=halves.length===2&&halves[1]?halves[1].split(':'):[];
+ const missing=8-(left.length+right.length);
+ if((halves.length===1&&missing!==0)||(halves.length===2&&missing<1))return null;
+ const parts=[...left,...Array(missing).fill('0'),...right];
+ if(parts.length!==8)return null;
+ const nums=[];
+ for(const p of parts){
+  if(!/^[0-9a-f]{1,4}$/i.test(p))return null;
+  nums.push(parseInt(p,16));
+ }
+ return nums;
+}
 export function publicIP(raw){
  const ip=raw.toLowerCase().replace(/^\[|\]$/g,'');
  if(isIP(ip)===4){const [a,b,c]=ip.split('.').map(Number);return !(a===0||a===10||a===127||a>=224||a===169&&b===254||a===172&&b>=16&&b<=31||a===192&&(b===168||b===0&&(c===0||c===2)||b===88&&c===99)||a===100&&b>=64&&b<=127||a===198&&(b===18||b===19||b===51&&c===100)||a===203&&b===0&&c===113);}
- if(isIP(ip)===6)return /^[23]/.test(ip)&&!(/^2002:|^2001:(db8|0{0,3}[012]|1[0-9a-f]|2[0-9a-f]):/i.test(ip)||ip.includes('.'));
+ if(isIP(ip)===6){
+  const h=expandIPv6(ip);
+  if(!h)return false;
+  const [h0,h1]=h;
+  // Only global unicast 2000::/3
+  if((h0&0xe000)!==0x2000)return false;
+  // Block 6to4 (2002::/16), 2001:0db8::/32 (doc, incl. leading zeros), 2001:0000::/23 (Teredo/benchmark/ORCHID), 3fff::/20 (RFC 9637 doc)
+  if(h0===0x2002)return false;
+  if(h0===0x2001&&(h1===0x0db8||h1<=0x01ff))return false;
+  if(h0===0x3fff&&(h1&0xf000)===0x0000)return false;
+  return true;
+ }
  return false;
 }
 export function publicURL(raw){
@@ -40,15 +69,19 @@ function key(){
  if(!value)throw Error('搜索凭据未配置');return value.trim();
 }
 function record(value){try{const folder=join(ROOT,'data/qqwhale');mkdirSync(folder,{recursive:true,mode:0o700});const file=join(folder,'search-calls.jsonl');try{if(statSync(file).size>512*1024)renameSync(file,file+'.1')}catch{}appendFileSync(file,JSON.stringify({ts:Date.now(),...value})+'\n',{mode:0o600})}catch{}}
-async function boundedJSON(response){
+async function boundedJSON(response,maxBytes=DEFAULT_MAX_RESPONSE_BYTES){
  if(!response.ok)throw Error('联网接口HTTP '+response.status);
+ const limit=Number.isInteger(maxBytes)&&maxBytes>0?maxBytes:DEFAULT_MAX_RESPONSE_BYTES;
  const reader=response.body.getReader();let bytes=0;const chunks=[];
- try{while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.length;const maxBytes=configuration().maxResponseBytes||0;if(maxBytes>0&&bytes>maxBytes){await reader.cancel();throw Error('联网结果超过大小限制')}chunks.push(Buffer.from(value))}}finally{reader.releaseLock()}
+ try{while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.length;if(bytes>limit){await reader.cancel();throw Error('联网结果超过大小限制')}chunks.push(Buffer.from(value))}}finally{reader.releaseLock()}
  let result;try{result=JSON.parse(Buffer.concat(chunks).toString('utf8'))}catch{throw Error('联网接口返回无效JSON')}
  if(!result||typeof result!=='object'||result.error)throw Error('联网接口返回错误');return result;
 }
 export async function callSearch(name,args,options={}){
- const values=validate(name,args);if(!configuration().enabled)throw Error('联网搜索已关闭');
+ const values=validate(name,args);
+ const cfg=configuration();
+ if(!cfg.enabled)throw Error('联网搜索已关闭');
+ const maxBytes=Number.isInteger(cfg.maxResponseBytes)&&cfg.maxResponseBytes>0?cfg.maxResponseBytes:DEFAULT_MAX_RESPONSE_BYTES;
  const start=Date.now(),meta={name,query:values.query?.slice(0,160),url:values.url};
  try{
   if(name==='web_fetch'){
@@ -58,7 +91,7 @@ export async function callSearch(name,args,options={}){
   }
   const route=name==='web_search'?'search':'web_fetch';
   const response=await (options.fetcher||fetch)(ENDPOINT+'/'+route,{method:'POST',redirect:'error',headers:{Authorization:'Bearer '+key(),'Content-Type':'application/json'},body:JSON.stringify(name==='web_search'?values:{url:values.url}),signal:options.signal?AbortSignal.any([options.signal,AbortSignal.timeout(60000)]):AbortSignal.timeout(60000)});
-  const result=await boundedJSON(response);let data,msg;
+  const result=await boundedJSON(response,maxBytes);let data,msg;
   if(name==='web_search'){
    if(!Array.isArray(result.results))throw Error('搜索结果结构无效');
    const results=result.results.slice(0,values.max_results).filter(r=>typeof r.url==='string'&&/^https?:\/\//.test(r.url)).map(r=>({title:String(r.title||r.url).slice(0,200),url:r.url,snippet:String(r.snippet||'').slice(0,1200)}));

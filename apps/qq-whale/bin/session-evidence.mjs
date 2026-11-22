@@ -41,16 +41,18 @@ export function scanProofs(dshHome) {
   }
   walk(join(dshHome,'sessions'));return proofs;
 }
-export function replyProof(proofs,dataRoot){
+export function replyProof(proofs,dataRoot,dshHome=process.env.DSH_HOME||''){
   let prefs={};try{prefs=JSON.parse(readFileSync(join(dataRoot,'.qqbot/model-prefs.json'),'utf8'))}catch{}
   let activeKeys=null;
-  try {
-    const y=createRequire(join(dataRoot,'..','app','package.json'))('js-yaml');
-    const config=y.load(readFileSync(join(dshHome,'profiles/web/cordis.patch.yml'),'utf8'));
-    const q=config.find(r=>r.id==='im-qqbot')?.config;
-    const appId=(readFileSync(join(dataRoot,'..','etc/qqbot.env'),'utf8').match(/^QQBOT_APPID=([0-9]+)$/m)||[])[1];
-    if(q&&appId){activeKeys=[];for(const [scope,mode,list]of [['c2c','c2cMode','c2cAllow'],['group','groupMode','groupAllow']])if(q.access?.[mode]==='allowlist')for(const peer of q.access[list]||[])activeKeys.push(`qqbot:${appId}:${scope}:${peer}`);}
-  }catch{}
+  if(dshHome){
+    try {
+      const y=createRequire(join(dataRoot,'..','app','package.json'))('js-yaml');
+      const config=y.load(readFileSync(join(dshHome,'profiles/web/cordis.patch.yml'),'utf8'));
+      const q=config.find(r=>r.id==='im-qqbot')?.config;
+      const appId=(readFileSync(join(dataRoot,'..','etc/qqbot.env'),'utf8').match(/^QQBOT_APPID=([0-9]+)$/m)||[])[1];
+      if(q&&appId){activeKeys=[];for(const [scope,mode,list]of [['c2c','c2cMode','c2cAllow'],['group','groupMode','groupAllow']])if(q.access?.[mode]==='allowlist')for(const peer of q.access[list]||[])activeKeys.push(`qqbot:${appId}:${scope}:${peer}`);}
+    }catch{}
+  }
   const keys=activeKeys||[...new Set([...Object.keys(prefs.sessionIds||{}),...Object.keys(prefs.sessionCfg||{})])].filter(k=>/^qqbot:[0-9]+:(?:c2c|group):[A-Fa-f0-9]{32}$/.test(k));
   const ids=keys.map(k=>{if(prefs.sessionIds?.[k])return prefs.sessionIds[k];const h=createHash('sha256').update(k).digest('hex');return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`});
   const candidates=(activeKeys!==null||ids.length)?ids.map(id=>proofs.get(id)).filter(Boolean):[...proofs.values()];

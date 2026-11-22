@@ -121,6 +121,7 @@ REDACT=0                  # 是否对文件内容做字段脱敏
 ENC_TOOL=""               # 实际选用的加密工具 age|gpg
 ENC_EXT=""                # 加密文件后缀 age|gpg
 SQLITE_OK=0
+SQLITE_BACKEND="none"
 STAT_FLAVOR="bsd"
 SHA_FLAVOR="none"
 BACKUP_DIR_CANON=""
@@ -188,7 +189,16 @@ _detect_platform() {
   elif _have openssl; then SHA_FLAVOR=openssl
   else SHA_FLAVOR=none
   fi
-  if _have sqlite3; then SQLITE_OK=1; else SQLITE_OK=0; fi
+  if _have python3 && python3 -c 'import sqlite3' >"$NULL_DEV" 2>&1; then
+    SQLITE_OK=1
+    SQLITE_BACKEND="python3"
+  elif _have sqlite3; then
+    SQLITE_OK=1
+    SQLITE_BACKEND="cli"
+  else
+    SQLITE_OK=0
+    SQLITE_BACKEND="none"
+  fi
 }
 
 _st_size() {
@@ -291,15 +301,26 @@ parse_args() {
 checkpoint_memory_db() {
   local db="${WHALE_ROOT}/data/qqwhale/memory.db"
   [ -f "$db" ] || return 0
-  if ! command -v node >"${NULL_DEV:-/dev/null}" 2>&1; then return 0; fi
-  node -e '
-    const { DatabaseSync } = require("node:sqlite");
-    try {
-      const db = new DatabaseSync(process.argv[1]);
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-      db.close();
-    } catch { /* 库被占用或损坏都不阻断备份 */ }
-  ' "$db" 2>"${NULL_DEV:-/dev/null}" || true
+  if command -v node >"${NULL_DEV:-/dev/null}" 2>&1; then
+    node -e '
+      const { DatabaseSync } = require("node:sqlite");
+      try {
+        const db = new DatabaseSync(process.argv[1]);
+        db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+        db.close();
+      } catch { /* 库被占用或只读都不阻断备份 */ }
+    ' "$db" 2>"${NULL_DEV:-/dev/null}" || true
+  elif command -v python3 >"${NULL_DEV:-/dev/null}" 2>&1; then
+    python3 -c '
+import sqlite3, sys
+try:
+    c = sqlite3.connect(sys.argv[1], timeout=5)
+    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    c.close()
+except Exception:
+    pass
+' "$db" 2>"${NULL_DEV:-/dev/null}" || true
+  fi
 }
 
 build_selection() {
@@ -592,14 +613,115 @@ _stage_redacted() {
   REDACTED_COUNT=$((REDACTED_COUNT + 1))
 }
 
-# SQLite：必须用 .backup 做在线一致性快照；不可用则跳过并告警
+# SQLite：使用参数化 Python sqlite3.backup()（优先）做在线一致性快照；避免 dot-command 注入并兼容只读/WAL 库
 _stage_sqlite() {
   local f="$1" dest="$2"
   if [ "$SQLITE_OK" != 1 ]; then
-    SKIPPED_SQLITE+=("$f （原因：未找到 sqlite3）")
-    warn "跳过 SQLite 文件（sqlite3 不可用，绝不直接 cp 正在写入的库）：$f"
+    SKIPPED_SQLITE+=("$f （原因：未找到 python3 sqlite3 或 sqlite3 命令）")
+    warn "跳过 SQLite 文件（无可用 SQLite 备份引擎，绝不直接 cp 正在写入的库）：$f"
     return 0
   fi
+  if [ "$SQLITE_BACKEND" = "python3" ]; then
+    if python3 - "$f" "$dest" >"$NULL_DEV" 2>&1 <<'PY'
+import os, shutil, sqlite3, sys, tempfile, time, urllib.parse
+
+src_abs = os.path.abspath(sys.argv[1])
+dst_abs = os.path.abspath(sys.argv[2])
+quoted = urllib.parse.quote(src_abs, safe='/')
+
+def run_backup(conn):
+    if os.path.exists(dst_abs):
+        os.unlink(dst_abs)
+    out = sqlite3.connect(dst_abs)
+    try:
+        conn.backup(out)
+        out.commit()
+        chk = out.execute('PRAGMA quick_check').fetchone()
+        if not chk or chk[0] != 'ok':
+            raise RuntimeError('backup quick_check failed')
+    finally:
+        out.close()
+
+def try_connect(target, uri=False, query_only=False):
+    conn = sqlite3.connect(target, uri=uri, timeout=30)
+    try:
+        if query_only:
+            conn.execute('PRAGMA query_only = ON')
+        run_backup(conn)
+        return True
+    finally:
+        conn.close()
+
+# 1. Read-only URI (works for rollback-journal DBs and live WAL DBs with accessible -shm)
+try:
+    if try_connect(f'file:{quoted}?mode=ro', uri=True):
+        sys.exit(0)
+except sqlite3.OperationalError:
+    pass
+
+# 2. Closed WAL DB on read-only mount (no active -wal): immutable=1 is safe
+wal = src_abs + '-wal'
+if not os.path.exists(wal) or os.path.getsize(wal) == 0:
+    try:
+        if try_connect(f'file:{quoted}?mode=ro&immutable=1', uri=True):
+            sys.exit(0)
+    except sqlite3.OperationalError:
+        pass
+
+# 3. Standard open with query_only=ON (allows WAL -shm creation in writable dir without writes)
+try:
+    if try_connect(src_abs, uri=False, query_only=True):
+        sys.exit(0)
+except sqlite3.OperationalError:
+    pass
+
+# 4. Read-only filesystem with active -wal: double-stat stability-checked staged WAL snapshot
+tmpd = tempfile.mkdtemp(prefix='.sqlite-ro-', dir=os.path.dirname(dst_abs))
+try:
+    def snap(p):
+        if not os.path.exists(p):
+            return None
+        st = os.stat(p)
+        return (st.st_size, st.st_mtime_ns)
+    for _ in range(3):
+        b_db, b_wal = snap(src_abs), snap(wal)
+        t_db = os.path.join(tmpd, 'src.db')
+        shutil.copy2(src_abs, t_db)
+        os.chmod(t_db, 0o600)
+        if os.path.exists(wal):
+            shutil.copy2(wal, t_db + '-wal')
+            os.chmod(t_db + '-wal', 0o600)
+        elif os.path.exists(t_db + '-wal'):
+            os.unlink(t_db + '-wal')
+        a_db, a_wal = snap(src_abs), snap(wal)
+        if (b_db, b_wal) == (a_db, a_wal):
+            if try_connect(t_db, uri=False):
+                sys.exit(0)
+        time.sleep(0.2)
+    sys.exit(1)
+finally:
+    shutil.rmtree(tmpd, ignore_errors=True)
+PY
+    then
+      if [ -f "$dest" ]; then
+        chmod 600 "$dest"
+        SQLITE_COUNT=$((SQLITE_COUNT + 1))
+        return 0
+      fi
+    fi
+    SKIPPED_SQLITE+=("$f （原因：python3 sqlite3.backup 失败）")
+    warn "python3 sqlite3.backup 失败，已跳过：$f"
+    rm -f "$dest"
+    return 0
+  fi
+
+  # Fallback only when python3 sqlite3 is unavailable; refuse unsafe quote/newline characters in dest
+  case "$dest" in
+    *"'"*|*$'\n'*|*$'\r'*)
+      SKIPPED_SQLITE+=("$f （原因：目标路径含不支持的特殊字符）")
+      warn "sqlite3 CLI 路径含不支持的字符，已跳过：$f"
+      return 0 ;;
+  esac
   if sqlite3 "$f" ".backup '$dest'" >"$NULL_DEV" 2>&1 && [ -f "$dest" ]; then
     chmod 600 "$dest"
     SQLITE_COUNT=$((SQLITE_COUNT + 1))

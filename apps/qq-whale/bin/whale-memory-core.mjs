@@ -175,15 +175,31 @@ export function archiveMessage(db, rec) {
   return info.changes > 0;
 }
 
+/** 转义 SQL LIKE 通配符（%、_、\），配合 ESCAPE '\' 使用。 */
+export function escapeLike(text) {
+  return String(text ?? '').replace(/[\\%_]/g, '\\$&');
+}
+
 /**
  * 检索历史消息。
- * trigram 分词下 <3 字符的查询无法 MATCH，降级为 LIKE（仍参数化）。
+ * trigram 分词下 <3 字符的查询无法 MATCH，降级为 LIKE（仍参数化并转义通配符）。
  */
 export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent = 0 }) {
   const text = String(q ?? '').trim();
   if (!text) return [];
   const lim = Number.isSafeInteger(limit) && limit >= 0 ? (limit || -1) : 5;
+  const excl = Number.isSafeInteger(excludeRecent) && excludeRecent > 0 ? excludeRecent : 0;
   const cutoff = beforeTs ?? Number.MAX_SAFE_INTEGER;
+  const appendExcludeRecent = (alias, pArr) => {
+    if (excl <= 0) return '';
+    if (peer) {
+      pArr.push(peer, excl);
+      return ` AND ${alias}id NOT IN (SELECT id FROM msg WHERE deleted = 0 AND peer = ? ORDER BY ts DESC LIMIT ?)`;
+    }
+    pArr.push(excl);
+    return ` AND ${alias}id NOT IN (SELECT id FROM msg WHERE deleted = 0 ORDER BY ts DESC LIMIT ?)`;
+  };
+
   const params = [text, cutoff];
   let sql;
 
@@ -198,19 +214,21 @@ export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent
       sql += ' AND m.peer = ?';
       params.push(peer);
     }
+    sql += appendExcludeRecent('m.', params);
     sql += ' ORDER BY bm25(msg_fts), m.ts DESC LIMIT ?';
-    params.push(lim < 0 ? -1 : lim + excludeRecent);
+    params.push(lim);
   } else {
     sql = `SELECT id, ts, scope, sender_name, text
              FROM msg
-            WHERE text LIKE ? AND deleted = 0 AND ts < ?`;
-    params[0] = `%${text}%`;
+            WHERE text LIKE ? ESCAPE '\\' AND deleted = 0 AND ts < ?`;
+    params[0] = `%${escapeLike(text)}%`;
     if (peer) {
       sql += ' AND peer = ?';
       params.push(peer);
     }
+    sql += appendExcludeRecent('', params);
     sql += ' ORDER BY ts DESC LIMIT ?';
-    params.push(lim < 0 ? -1 : lim + excludeRecent);
+    params.push(lim);
   }
 
   let rows = [];
@@ -227,9 +245,8 @@ export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent
   if (rows.length === 0) {
     const grams = bigrams(text);
     if (grams.length > 0) {
-      const conds = grams.map(() => 'text LIKE ?').join(' OR ');
-      const p2 = [`%${grams[0]}%`];
-      for (let i = 1; i < grams.length; i += 1) p2.push(`%${grams[i]}%`);
+      const conds = grams.map(() => "text LIKE ? ESCAPE '\\'").join(' OR ');
+      const p2 = grams.map((g) => `%${escapeLike(g)}%`);
       p2.push(cutoff);
       let sql2 = `SELECT id, ts, scope, sender_name, text FROM msg
                    WHERE deleted = 0 AND (${conds}) AND ts < ?`;
@@ -237,8 +254,9 @@ export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent
         sql2 += ' AND peer = ?';
         p2.push(peer);
       }
+      sql2 += appendExcludeRecent('', p2);
       sql2 += ' ORDER BY ts DESC LIMIT ?';
-      p2.push(lim < 0 ? -1 : lim + excludeRecent);
+      p2.push(lim);
       try {
         rows = db.prepare(sql2).all(...p2);
       } catch {
@@ -247,7 +265,6 @@ export function searchMessages(db, { q, peer, limit = 5, beforeTs, excludeRecent
     }
   }
 
-  if (excludeRecent > 0 && lim > 0) rows = rows.slice(0, lim);
   return rows;
 }
 
@@ -299,8 +316,8 @@ export function searchMemories(db, { q, limit = 5 }) {
     }
     return db
       .prepare(`SELECT id, ts, kind, text FROM memory
-                 WHERE text LIKE ? AND deleted = 0 ORDER BY ts DESC LIMIT ?`)
-      .all(`%${text}%`, lim);
+                 WHERE text LIKE ? ESCAPE '\\' AND deleted = 0 ORDER BY ts DESC LIMIT ?`)
+      .all(`%${escapeLike(text)}%`, lim);
   } catch {
     return [];
   }
