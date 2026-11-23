@@ -50,7 +50,7 @@ const dataRoot = opt('data-root', process.env.WHALE_ROOT ? join(process.env.WHAL
 const maxAgeHours = Number(opt('max-age-hours', '24'));
 const asJson = argv.includes('--json');
 const proofs=scanProofs(dshHome);
-const reply=replyProof(proofs,dataRoot);
+const reply=replyProof(proofs,dataRoot,dshHome);
 const maxAgeMs = (Number.isFinite(maxAgeHours) && maxAgeHours > 0 ? maxAgeHours : 24) * 3600 * 1000;
 
 // ── 小工具 ──────────────────────────────────────────────────────────────────

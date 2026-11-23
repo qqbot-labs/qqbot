@@ -45,33 +45,46 @@ async def periodic(engine):
                         if cfg.policy.retention_days>0:c.execute("DELETE FROM events WHERE channel='qq' AND created<?",(now()-cfg.policy.retention_days*86400,))
                         if cfg.qzone.retention_days>0:c.execute("DELETE FROM events WHERE channel='qzone' AND created<?",(now()-cfg.qzone.retention_days*86400,))
                         if cfg.policy.log_days>0:c.execute('DELETE FROM logs WHERE created<?',(now()-cfg.policy.log_days*86400,))
-                    detail='已执行事件与日志保留策略；不清理发送账本去重锚点'
+                        c.execute('DELETE FROM sessions WHERE expires<?',(now(),))
+                    detail='已执行事件、日志与过期会话清理策略；不清理发送账本去重锚点'
             except asyncio.CancelledError:raise
             except Exception:failure=1;detail='任务失败；已隔离，等待下个周期'
             detail+='；耗时 '+format(time.monotonic()-started,'.3f')+' 秒'
             with s.db() as c:c.execute('UPDATE tasks SET detail=?,failures=? WHERE name=?',(detail,task['failures']+failure if failure else 0,name))
         await asyncio.sleep(2)
 
+def _parse_qzone_ts(raw, fallback=0.0):
+    try:
+        val = float(raw or 0)
+    except (ValueError, TypeError):
+        return fallback
+    if val > 100000000000:
+        val /= 1000
+    return val or fallback
+
 async def poll_qzone(engine):
-    async with engine.decide_lock:
+    # Serialize QZone HTTP polling on its own lock so slow polls never block QQ private chat replies.
+    async with engine.poll_lock:
         return await _poll_qzone(engine)
 
 async def _poll_qzone(engine):
-    s=engine.s;cfg=s.config();stamp=now();baseline=s.get('qzone_baseline')
+    s=engine.s;cfg=s.config();stamp=now();baseline=s.get('qzone_baseline');epoch=s.get('cancel_epoch')
     try:
         cursor=''
         for page in range(cfg.qzone.pages):
             result=await engine.channels.call('qzone','get_friend_feeds',{'cursor':cursor,'num':cfg.qzone.candidates,'include_image_data':False})
+            if s.get('cancel_epoch')!=epoch:return
             # Preserve parser metadata, never equate a parse miss with an empty feed.
             if not isinstance(result,dict):raise Rejected('好友流结构无效')
             feeds=result.get('feeds',result.get('items',result.get('msglist')))
             if feeds is None:raise Rejected('未识别到动态列表；不能判断没有新动态')
             for item in feeds[:cfg.qzone.candidates]:
+                if not isinstance(item,dict):continue
                 friend=str(item.get('uin') or item.get('user_id') or '')
                 if not engine.permitted(friend,'read'):continue
                 tid=str(item.get('tid') or item.get('id') or '')
                 if not tid:continue
-                created=float(item.get('created_time') or item.get('time') or 0)
+                created=_parse_qzone_ts(item.get('created_time') or item.get('time'), 0.0)
                 # Missing timestamps are baseline only; never synthesize freshness from polling time.
                 e={'user_id':friend,'event_id':'feed:'+friend+':'+tid,'tid':tid,'text':str(item.get('content') or item.get('text') or ''),'time':created or 1}
                 r=engine.ingest('qzone',e)
@@ -81,6 +94,7 @@ async def _poll_qzone(engine):
             if not result.get('has_more') or not cursor:break
         if cfg.qzone.reply and cfg.channel.qq_id:
             await poll_own_comments(engine,baseline,stamp)
+        if s.get('cancel_epoch')!=epoch:return
         s.set('qzone_baseline',baseline or stamp)
         s.set('health_qzone',{'online':True,'verified':True,'checked':stamp,'reason':'读取完成；可能存在接口解析缺项','last_read':stamp})
     except Exception:
@@ -128,19 +142,22 @@ async def _autonomous(engine):
 async def poll_own_comments(engine,baseline,stamp):
     s=engine.s;cfg=s.config();owner=cfg.channel.qq_id
     posts=await engine.channels.call('qzone','get_emotion_list',{'user_id':owner,'num':cfg.qzone.candidates,'max_pages':1,'include_image_data':False})
-    for post in posts.get('msglist',[])[:cfg.qzone.candidates]:
+    if not isinstance(posts,dict):return
+    for post in (posts.get('msglist') or [])[:cfg.qzone.candidates]:
+        if not isinstance(post,dict):continue
         tid=str(post.get('tid') or '')
         if not tid:continue
         result=await engine.channels.call('qzone','get_comment_list',{'user_id':owner,'tid':tid,'num':20,'pos':0})
+        if not isinstance(result,dict):continue
         if result.get('availability')=='not_embedded':
             s.log('','qzone-comments','skipped','评论内容未嵌入，不能视为没有评论');continue
-        for comment in result.get('comments',[]):
+        for comment in (result.get('comments') or []):
+            if not isinstance(comment,dict):continue
             # 上游移动端评论键为小写 commentid；同时兼容驼峰与包装层字段。
             friend=str(comment.get('uin') or comment.get('user_id') or '')
             cid=str(comment.get('commentid') or comment.get('commentId') or comment.get('comment_id') or comment.get('id') or '')
             if not friend.isdecimal() or not cid or friend==owner:continue
-            created=float(comment.get('createdTime') or comment.get('createTime') or comment.get('createtime') or comment.get('created_time') or comment.get('time') or 1)
-            if created>100000000000:created/=1000
+            created=_parse_qzone_ts(comment.get('createdTime') or comment.get('createTime') or comment.get('createtime') or comment.get('created_time') or comment.get('time'), 1.0)
             event={'event_id':'comment:'+tid+':'+cid,'user_id':friend,'sub_type':'comment','tid':tid,'owner_uin':owner,'comment_id':cid,'text':str(comment.get('content') or ''),'time':created}
             r=engine.ingest('qzone',event)
             if not baseline and r.get('id'):

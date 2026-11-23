@@ -8,15 +8,20 @@ API_BASE=(os.environ.get('WHALE_API_BASE') or 'https://api.example.com/v1').rstr
 
 def bridge(method,**args):
     path=d.ROOT/'data/.admin-control.sock'
-    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
-        s.settimeout(105);s.connect(str(path));s.sendall((json.dumps({'method':method,**args})+'\n').encode())
-        raw=s.makefile('rb').readline(2*1024*1024)
-    r=json.loads(raw)
+    try:
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+            s.settimeout(105);s.connect(str(path));s.sendall((json.dumps({'method':method,**args})+'\n').encode())
+            raw=s.makefile('rb').readline(2*1024*1024)
+        r=json.loads(raw)
+    except (OSError,ValueError):
+        raise d.Error('QQ 本地控制接口未就绪，请检查服务状态') from None
     if not r.get('ok'):raise d.Error(d.redact(str(r.get('error','会话操作失败'))))
     return r['data']
 
 def rpc(method,args):
-    tokens=re.findall(r'http://127\.0\.0\.1:3080/\?token=([A-Za-z0-9_.~-]+)',(d.ROOT/'logs/dsh.log').read_text(errors='replace'))
+    log_path=d.ROOT/'logs/dsh.log'
+    if not log_path.exists():raise d.Error('DSH 日志不存在或服务未启动')
+    tokens=re.findall(r'http://127\.0\.0\.1:3080/\?token=([A-Za-z0-9_.~-]+)',log_path.read_text(errors='replace'))
     if not tokens:raise d.Error('DSH 当前没有可用的管理凭据')
     base='http://127.0.0.1:3080';op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
     op.open(base+'/?token='+tokens[-1],timeout=10).close()
@@ -60,13 +65,22 @@ def calls(args):
     raw=d.run(['/usr/bin/node',str(Path(__file__).with_name('read-events.mjs')),'calls',sid],timeout=35)
     data=json.loads(raw)
     probes=d.STATE/'probes.jsonl'
-    data['probes']=[json.loads(l) for l in probes.read_text().splitlines()[-50:]][::-1] if probes.exists() else []
+    probe_items=[]
+    if probes.exists():
+        for l in probes.read_text().splitlines()[-50:]:
+            try:probe_items.append(json.loads(l))
+            except ValueError:pass
+    data['probes']=probe_items[::-1]
     if sid:data['messages']=json.loads(d.run(['/usr/bin/node',str(Path(__file__).with_name('read-events.mjs')),'messages',sid],timeout=35))['messages']
     for c in data.get('calls',[]):c['errorMessage']=d.redact(c.get('errorMessage',''))
     return data
 
 def routing_get():
-    policy=json.loads(ROUTING.read_text()) if ROUTING.exists() else {'enabled':False,'models':[],'cooldownSec':0}
+    default={'enabled':False,'models':[],'cooldownSec':0}
+    try:
+        parsed=json.loads(ROUTING.read_text()) if ROUTING.exists() else {}
+        policy={**default,**parsed} if isinstance(parsed,dict) else dict(default)
+    except (OSError,ValueError):policy=dict(default)
     p=d.ROOT/'data/qqwhale/routing-events.jsonl';events=[]
     if p.exists():
         for line in p.read_text()[-40000:].splitlines()[-50:]:
@@ -128,15 +142,23 @@ def probe(body):
     return entry
 
 VISION=d.ROOT/'etc/vision-routing.json'
+VISION_DEFAULT={'enabled':False,'model':'','fallbackModel':'','gifFrames':6,'maxImages':0,'timeoutMs':35000}
 def vision_models(refresh=False):
     path=d.STATE/'vision-catalog.json'
     if refresh or not path.exists():
+        d.STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
         data=[m for m in catalog() if m.get('supports_images') is True]
         d.atomic(path,(json.dumps(data,ensure_ascii=False)+'\n').encode(),owner=(0,0))
-    return json.loads(path.read_text())
+    try:
+        parsed=json.loads(path.read_text())
+        return parsed if isinstance(parsed,list) else []
+    except (OSError,ValueError):return []
 
 def vision_get():
-    policy=json.loads(VISION.read_text())
+    try:
+        parsed=json.loads(VISION.read_text()) if VISION.exists() else {}
+        policy={**VISION_DEFAULT,**(parsed if isinstance(parsed,dict) else {})}
+    except (OSError,ValueError):policy=dict(VISION_DEFAULT)
     events=[];path=d.ROOT/'data/qqwhale/vision-calls.jsonl'
     if path.exists():
         for line in path.read_text()[-160000:].splitlines()[-50:]:
@@ -147,17 +169,20 @@ def vision_get():
         for line in proof.read_text().splitlines()[-30:]:
             try:probes.append(json.loads(line))
             except ValueError:pass
-    return {'config':policy,'revision':d.digest(VISION.read_bytes()),'models':vision_models(),'events':list(reversed(events)),'probes':list(reversed(probes))}
+    rev=d.digest(VISION.read_bytes()) if VISION.exists() else 'missing'
+    return {'config':policy,'revision':rev,'models':vision_models(),'events':list(reversed(events)),'probes':list(reversed(probes))}
 
 def vision_save(body):
     if set(body)-{'enabled','model','fallbackModel','gifFrames','maxImages','timeoutMs','revision'}:raise d.Error('视觉规则包含未知字段')
-    if body.get('revision')!=d.digest(VISION.read_bytes()):raise d.Error('视觉配置已更改，请刷新后保存')
+    current_rev=d.digest(VISION.read_bytes()) if VISION.exists() else 'missing'
+    if body.get('revision')!=current_rev:raise d.Error('视觉配置已更改，请刷新后保存')
     models={m['id'] for m in vision_models()}
     if type(body.get('enabled'))!=bool or body.get('model') not in models or body.get('fallbackModel') not in models:raise d.Error('请选择网关公告支持图片的视觉模型')
     for name,lo,hi in [('gifFrames',1,None),('maxImages',0,None),('timeoutMs',1,None)]:
         if type(body.get(name))!=int or body[name]<lo:raise d.Error('视觉参数超出范围：'+name)
     folder=d.STATE/'vision-revisions';folder.mkdir(parents=True,exist_ok=True,mode=0o700)
-    d.shutil.copyfile(VISION,folder/(d.stamp()+'.json'))
+    VISION.parent.mkdir(parents=True,exist_ok=True)
+    if VISION.exists():d.shutil.copyfile(VISION,folder/(d.stamp()+'.json'))
     policy={k:v for k,v in body.items() if k!='revision'}
     d.atomic(VISION,(json.dumps(policy,ensure_ascii=False,indent=2)+'\n').encode(),owner=(0,d.pwd.getpwnam('qqwhale').pw_gid));d.os.chmod(VISION,0o640)
     d.audit('vision.save');return {'message':'视觉路由已保存，新图片立即按新规则处理；文字聊天模型不变。'}

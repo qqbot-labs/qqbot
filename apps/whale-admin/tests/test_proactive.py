@@ -95,5 +95,62 @@ class ProactiveTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):p.generate({**self.config,'mode':'ai'})
         self.assertEqual(self.sent,[])
 
+    def test_interrupted_before_first_part_does_not_overwrite_last_sent_or_last_text(self):
+        prior = {'target':'app:'+'a'*32,'status':'sent','lastSent':1700000000.0,'lastText':'之前发过的话'}
+        p.atomic(p.STATE, prior)
+        # initial last_inbound=1, pre-token check=1, index=0 pre-send check=2 -> interrupted before any part is sent
+        self.inbound.side_effect = [1, 1, 2]
+        result = p.tick(manual=True)
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertEqual(result['sentParts'], 0)
+        st = p.state()
+        self.assertEqual(st['lastSent'], 1700000000.0)
+        self.assertEqual(st['lastText'], '之前发过的话')
+        self.assertEqual(self.sent, [])
+
+    def test_unknown_status_blocks_before_calling_llm_until_new_inbound(self):
+        p.atomic(p.STATE, {'target':'app:'+'a'*32,'status':'unknown','attemptInboundAt':1,'lastPlannedText':'旧文案'})
+        ai_cfg = {**self.config, 'mode':'ai'}
+        p.POLICY.write_text(json.dumps(ai_cfg))
+        with patch.object(p, 'decide_and_generate', side_effect=AssertionError('LLM must not be called')) as llm:
+            res = p.tick(manual=False)
+            self.assertEqual(res['status'], 'skipped')
+            self.assertIn('未知', res['reason'])
+            llm.assert_not_called()
+        # Once a newer real inbound message arrives (last=2 > attemptInboundAt=1), evaluation resumes.
+        self.inbound.return_value = 2
+        with patch.object(p, 'decide_and_generate', return_value=(False, '', {'kind':'decision'}, '暂不打扰')) as llm:
+            res = p.tick(manual=False)
+            self.assertEqual(res['status'], 'skipped')
+            llm.assert_called_once()
+
+    def test_ai_payload_omits_reasoning_effort_when_thinking_disabled(self):
+        captured = []
+        def fake_post(url, body, headers=None, **kwargs):
+            captured.append(body)
+            if len(captured) == 1:
+                return {'choices':[{'message':{'content':'嗨，最近还好吗'}}]}
+            return {'choices':[{'message':{'content':'{"send":false,"reason":"ok","text":""}'}}]}
+        ai_cfg = {**self.config, 'mode':'ai'}
+        with patch.object(p, '_persona_context', return_value=({'WHALE_API_KEY':'k','WHALE_API_BASE':'https://api.example.com/v1'}, 'persona', 'm', [], 'inst')), \
+             patch.object(p, 'post', side_effect=fake_post):
+            p.generate_ai(ai_cfg)
+            p.decide_and_generate(ai_cfg, {}, 1)
+        self.assertEqual(len(captured), 2)
+        for payload in captured:
+            self.assertEqual(payload['thinking'], {'type':'disabled'})
+            self.assertNotIn('reasoning_effort', payload)
+
+    def test_proactive_get_survives_stopped_socket(self):
+        import sys
+        if str(SOURCE) not in sys.path:
+            sys.path.insert(0, str(SOURCE))
+        import domain as d, integrations as i
+        with patch.object(i, 'bridge', side_effect=FileNotFoundError('socket missing')), \
+             patch.object(d, 'envvalues', return_value={'QQBOT_APPID':'app'}):
+            data = p.get()
+        self.assertEqual(data['peers'], [])
+        self.assertEqual(data['currentAppId'], 'app')
+
 
 if __name__ == '__main__':unittest.main()

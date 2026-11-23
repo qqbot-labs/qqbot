@@ -1,4 +1,4 @@
-import asyncio, base64, difflib, hashlib, hmac, json, os, secrets, time
+import asyncio, base64, difflib, hashlib, hmac, ipaddress, json, os, re, secrets, threading, time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -17,6 +17,7 @@ from . import backup
 
 class Input(BaseModel):model_config=ConfigDict(extra='forbid',strict=True)
 class Login(Input):password:str=Field(max_length=200)
+class PasswordChange(Input):old:str=Field(min_length=1,max_length=200);password:str=Field(min_length=1,max_length=200)
 class ConfigInput(Input):revision:int;config:dict
 class SecretInput(Input):name:str;value:str=Field('',max_length=20000);clear:bool=False
 class PersonaInput(Input):body:str=Field(max_length=100000);enable:bool=False
@@ -26,6 +27,50 @@ class FriendInput(Input):id:str;permissions:Permissions;reset_optout:bool=False
 class MemoryInput(Input):friend:str;body:str=Field(min_length=1,max_length=5000);source:str=Field(min_length=1,max_length=500);label:str='fact';kind:str='memory'
 class TestInput(Input):text:str=Field(min_length=1,max_length=1000);request_id:str=Field(min_length=8,max_length=100)
 class Component(Input):component:str;action:str
+
+MAX_LOGIN_ATTEMPTS_KEYS = 4096
+
+def _https_netloc(parsed):
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return ''
+    if not hostname or parsed.username or parsed.password:
+        return ''
+    host = hostname.lower()
+    if ':' in host:
+        host = f'[{host}]'
+    return host if port in (None, 443) else f'{host}:{port}'
+
+def _normalize_origin(raw, *, allow_slash=False):
+    if not isinstance(raw, str) or not raw:
+        return ''
+    try:
+        u = urlsplit(raw)
+        hostname = u.hostname
+        port = u.port
+    except ValueError:
+        return ''
+    if u.scheme not in ('http', 'https') or not hostname:
+        return ''
+    if u.username or u.password or u.query or u.fragment:
+        return ''
+    if (u.path not in ('', '/')) if allow_slash else (u.path != ''):
+        return ''
+    host = hostname.lower()
+    if ':' in host:
+        host = f'[{host}]'
+    default_port = 443 if u.scheme == 'https' else 80
+    netloc = host if port in (None, default_port) else f'{host}:{port}'
+    return f'{u.scheme}://{netloc}'
+
+def _validate_new_password(password: str):
+    if '\x00' in password or len(password) > 200:
+        raise ValueError('新密码格式无效或长度超过 200 字符')
+    min_len = 3 if re.fullmatch(r'[\u3400-\u4dbf\u4e00-\u9fff]+', password) else 6
+    if len(password) < min_len:
+        raise ValueError('纯中文密码至少 3 个汉字，其他密码至少 6 个字符；最多 200 字符')
 
 # 建议目录，不是白名单：手动填写其他 OpenAI-compatible 模型仍然可用。
 MODEL_CATALOG=(
@@ -48,14 +93,22 @@ def create_app(data_dir=None,project_root=None,background=True):
     root=Path(project_root or Path(__file__).resolve().parents[1]);s=Store(data_dir or os.environ.get('QQAGENT_DATA',root/'.runtime'))
     runtime=Runtime(root);engine=Engine(s,runtime.versions)
     public_origin=os.environ.get('QQAGENT_PUBLIC_ORIGIN','')
-    public_url=urlsplit(public_origin)
+    try:
+        public_url=urlsplit(public_origin)
+        _public_port=public_url.port if public_origin else None
+    except ValueError:
+        raise ValueError('公网入口必须为不带路径和凭据的 HTTPS origin') from None
     if public_origin and (public_url.scheme!='https' or not public_url.hostname or public_url.username or public_url.password or public_url.path or public_url.query or public_url.fragment):
         raise ValueError('公网入口必须为不带路径和凭据的 HTTPS origin')
     # First password is only written to an owner-readable local file, never printed/logged.
     if not s.get('password_hash'):
         pw=secrets.token_urlsafe(24);salt=secrets.token_bytes(16)
         s.set('password_hash',{'salt':salt.hex(),'hash':hashlib.scrypt(pw.encode(),salt=salt,n=16384,r=8,p=1).hex()})
-        p=s.root/'admin-password.txt';p.write_text(pw+'\n');p.chmod(0o600)
+        p=s.root/'admin-password.txt'
+        fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w',encoding='utf-8') as f:
+            f.write(pw+'\n');f.flush();os.fsync(f.fileno())
+        os.chmod(p,0o600)
     @asynccontextmanager
     async def lifespan(app):
         tasks=[]
@@ -69,16 +122,36 @@ def create_app(data_dir=None,project_root=None,background=True):
         await asyncio.gather(*tasks,return_exceptions=True)
     app=FastAPI(title='QQ Agent 统一管理台',docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
     app.state.store=s;app.state.engine=engine;app.state.runtime=runtime
-    attempts={}
+    attempts={};attempts_lock=threading.Lock()
+    app.state.attempts=attempts
+    public_netloc=_https_netloc(public_url) if public_origin else ''
     @app.middleware('http')
     async def security(req,call_next):
-        host=req.url.hostname
-        local_host=host in ('127.0.0.1','localhost','::1','testserver')
-        public_host=bool(public_origin) and req.url.scheme=='https' and req.url.netloc==public_url.netloc
+        try:
+            req_url=req.url
+            host=req_url.hostname
+            _req_port=req_url.port
+            has_userinfo=bool(req_url.username or req_url.password)
+        except ValueError:
+            return JSONResponse({'detail':'Host 不允许'},400)
+        if not host or has_userinfo:return JSONResponse({'detail':'Host 不允许'},400)
+        local_host=host.lower() in ('127.0.0.1','localhost','::1','testserver')
+        public_host=bool(public_origin) and req_url.scheme=='https' and bool(public_netloc) and _https_netloc(req_url)==public_netloc
         if not (local_host or public_host):return JSONResponse({'detail':'Host 不允许'},400)
         if req.method not in ('GET','HEAD','OPTIONS'):
             origin=req.headers.get('origin')
-            if origin and origin!=str(req.base_url).rstrip('/'):return JSONResponse({'detail':'Origin 不允许'},403)
+            if origin is not None:
+                norm_origin=_normalize_origin(origin)
+                norm_base=_normalize_origin(str(req.base_url),allow_slash=True)
+                if not norm_origin or not norm_base or norm_origin!=norm_base:
+                    return JSONResponse({'detail':'Origin 不允许'},403)
+        # Authenticate & verify CSRF BEFORE buffering up to 8 MB of request body.
+        if req.url.path.startswith('/api/') and req.url.path!='/api/login':
+            sid=req.cookies.get('qqagent_session','');rows=s.rows('SELECT * FROM sessions WHERE id=? AND expires>?',(hashlib.sha256(sid.encode()).hexdigest(),now()))
+            if not rows:return JSONResponse({'detail':'请登录管理台'},401)
+            req.state.session=rows[0]
+            if req.method not in ('GET','HEAD') and not hmac.compare_digest(req.headers.get('x-csrf-token',''),rows[0]['csrf']):return JSONResponse({'detail':'CSRF 校验失败'},403)
+        if req.method not in ('GET','HEAD','OPTIONS'):
             length=req.headers.get('content-length')
             if length and (not length.isdecimal() or int(length)>8*1024*1024):return JSONResponse({'detail':'提交超过限制'},413)
             chunks=[];received=0
@@ -87,12 +160,6 @@ def create_app(data_dir=None,project_root=None,background=True):
                 if received>8*1024*1024:return JSONResponse({'detail':'提交超过限制'},413)
                 chunks.append(chunk)
             req._body=b''.join(chunks)
-
-        if req.url.path.startswith('/api/') and req.url.path!='/api/login':
-            sid=req.cookies.get('qqagent_session','');rows=s.rows('SELECT * FROM sessions WHERE id=? AND expires>?',(hashlib.sha256(sid.encode()).hexdigest(),now()))
-            if not rows:return JSONResponse({'detail':'请登录管理台'},401)
-            req.state.session=rows[0]
-            if req.method not in ('GET','HEAD') and not hmac.compare_digest(req.headers.get('x-csrf-token',''),rows[0]['csrf']):return JSONResponse({'detail':'CSRF 校验失败'},403)
         res=await call_next(req)
         for k,v in {'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}.items():res.headers[k]=v
         return res
@@ -112,16 +179,53 @@ def create_app(data_dir=None,project_root=None,background=True):
     def index():return FileResponse(root/'qqagent/static/index.html')
     @app.get('/healthz')
     def health():return {'service':'qq-agent-console','ok':True,'version':'0.1.0'}
+    def _client_ip(req: Request) -> str:
+        peer = req.client.host if req.client else 'local'
+        if public_origin and peer in ('127.0.0.1', '::1'):
+            forwarded = req.headers.get('x-real-ip', '').strip()
+            if forwarded:
+                try:
+                    return str(ipaddress.ip_address(forwarded))
+                except ValueError:
+                    pass
+        return peer
+
     @app.post('/api/login')
     def login(data:Login,req:Request):
-        ip=req.client.host if req.client else 'local';record=attempts.get(ip,[]);record=[x for x in record if now()-x<300]
-        if len(record)>=10:raise HTTPException(429,'登录过于频繁，请五分钟后重试')
-        record.append(now());attempts[ip]=record
+        ip=_client_ip(req);ts=now()
+        with attempts_lock:
+            if len(attempts)>=MAX_LOGIN_ATTEMPTS_KEYS:
+                for key in list(attempts):
+                    if not any(ts-x<300 for x in attempts[key]):attempts.pop(key,None)
+                while len(attempts)>=MAX_LOGIN_ATTEMPTS_KEYS and ip not in attempts:
+                    attempts.pop(next(iter(attempts)))
+            record=[x for x in attempts.get(ip,[]) if ts-x<300]
+            if len(record)>=10:
+                attempts[ip]=record
+                raise HTTPException(429,'登录过于频繁，请五分钟后重试')
+            record.append(ts);attempts[ip]=record
         ph=s.get('password_hash');digest=hashlib.scrypt(data.password.encode(),salt=bytes.fromhex(ph['salt']),n=16384,r=8,p=1).hex()
         if not hmac.compare_digest(digest,ph['hash']):raise HTTPException(401,'管理密码不正确')
-        attempts[ip]=[];sid=secrets.token_urlsafe(32);csrf=secrets.token_urlsafe(32)
+        with attempts_lock:
+            attempts.pop(ip,None)
+        sid=secrets.token_urlsafe(32);csrf=secrets.token_urlsafe(32)
         with s.db() as c:c.execute('INSERT INTO sessions VALUES(?,?,?)',(hashlib.sha256(sid.encode()).hexdigest(),csrf,now()+8*3600))
         res=JSONResponse({'csrf':csrf});res.set_cookie('qqagent_session',sid,httponly=True,samesite='strict',secure=req.url.scheme=='https',max_age=8*3600);return res
+    @app.post('/api/password')
+    def change_password(data:PasswordChange,req:Request):
+        ph=s.get('password_hash')
+        digest=hashlib.scrypt(data.old.encode(),salt=bytes.fromhex(ph['salt']),n=16384,r=8,p=1).hex()
+        if not hmac.compare_digest(digest,ph['hash']):raise ValueError('当前管理密码不正确')
+        _validate_new_password(data.password)
+        salt=secrets.token_bytes(16)
+        new_hash={'salt':salt.hex(),'hash':hashlib.scrypt(data.password.encode(),salt=salt,n=16384,r=8,p=1).hex()}
+        with s.db() as c:
+            c.execute("INSERT OR REPLACE INTO meta VALUES('password_hash',?)",(js(new_hash),))
+            c.execute('DELETE FROM sessions WHERE id!=?',(req.state.session['id'],))
+        try:(s.root/'admin-password.txt').unlink()
+        except FileNotFoundError:pass
+        s.log('','password','changed','管理密码已在线修改')
+        return {'ok':True,'message':'管理密码已修改，其他登录会话已失效。'}
     @app.get('/api/session')
     def session(req:Request):return {'csrf':req.state.session['csrf']}
     @app.post('/api/logout')
@@ -168,7 +272,13 @@ def create_app(data_dir=None,project_root=None,background=True):
         return {k:s.get(k) for k in ('pause_active','stop_all','social_running')}
     @app.post('/api/components')
     async def components(data:Component):
-        if data.action=='stop':s.control(stop=True,running=False)
+        if data.component not in ('napcat','qzone') or data.action not in ('start','stop','restart','status'):
+            raise ValueError('组件或动作不允许')
+        if not runtime.deployed:
+            raise ValueError('当前为本地开发，组件控制仅在隔离部署中可用')
+        # Stopping QZone must stay independent and never kill QQ private chat.
+        if data.component=='napcat' and data.action=='stop':
+            s.control(stop=True,running=False)
         return await runtime.control(data.component,data.action)
     @app.post('/api/check/{channel}')
     async def check(channel:str):
@@ -309,8 +419,11 @@ def create_app(data_dir=None,project_root=None,background=True):
     def make_backup():return JSONResponse(backup.export(s),headers={'Content-Disposition':'attachment; filename=qq-agent-backup.json'})
     @app.post('/api/backup/restore')
     async def restore_backup(req:Request):
+        payload=await req.json()
         async with engine.decide_lock:
-            async with engine.send_lock:return backup.restore(s,await req.json())
+            async with engine.send_lock:
+                async with engine.poll_lock:
+                    return await asyncio.to_thread(backup.restore,s,payload)
     @app.get('/api/diagnostics')
     def diagnostics():return {'version':'0.1.0','versions':runtime.versions(),'config_revision':s.get('revision'),'controls':{k:s.get(k) for k in ('pause_active','stop_all')},'logs':[{'action':r['action'],'result':r['result'],'created':r['created']} for r in s.rows('SELECT * FROM logs ORDER BY id DESC LIMIT 100')],'privacy':'不含凭据、人格、好友标识或聊天内容'}
     app.mount('/static',StaticFiles(directory=root/'qqagent/static'),name='static')

@@ -69,14 +69,56 @@ web_port() {
   fi
 }
 
-# 读取 patch 里某个键的当前值（只处理顶层缩进固定的标量，够用且安全）
+# 读取 patch 里某个键的当前值（支持标量、单行/多行流式列表、以及多行块列表）
 patch_get() {
   local key="$1"
   [ -f "$PATCH" ] || { echo ""; return; }
-  grep -E "^[[:space:]]*${key}:[[:space:]]*" "$PATCH" | head -1 | sed -E "s/^[[:space:]]*${key}:[[:space:]]*//" | sed -E 's/[[:space:]]*#.*$//'
+  python3 - "$PATCH" "$key" <<'PY'
+import re, sys, pathlib
+path, key = sys.argv[1], sys.argv[2]
+lines = pathlib.Path(path).read_text(encoding='utf-8').splitlines()
+pat = re.compile(r'^([ \t]*)' + re.escape(key) + r':[ \t]*(.*)$')
+for idx, line in enumerate(lines):
+    m = pat.match(line)
+    if not m:
+        continue
+    indent = len(m.group(1))
+    rest = re.sub(r'[ \t]*#.*$', '', m.group(2)).strip()
+    if rest:
+        if rest.startswith('[') and ']' not in rest:
+            buf = [rest]
+            for j in range(idx + 1, len(lines)):
+                part = re.sub(r'[ \t]*#.*$', '', lines[j]).strip()
+                buf.append(part)
+                if ']' in part:
+                    break
+            print(' '.join(buf))
+        else:
+            print(rest)
+        sys.exit(0)
+    # Multi-line block list under key:
+    items = []
+    for j in range(idx + 1, len(lines)):
+        raw = lines[j]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        li = len(raw) - len(raw.lstrip(' \t'))
+        if li < indent:
+            break
+        mm = re.match(r'^[ \t]*-(?:[ \t]+(.*))?$', raw)
+        if mm:
+            val = re.sub(r'[ \t]*#.*$', '', (mm.group(1) or '')).strip().strip("'\"")
+            if val:
+                items.append(val)
+            continue
+        break
+    print('[' + ', '.join(f"'{i}'" for i in items) + ']' if items else '')
+    sys.exit(0)
+PY
 }
 
-# 修改 patch 里的标量键：先备份，再原地替换；找不到键就报错（不静默新建）
+# 修改 patch 里的标量键：先备份，再原子替换；找不到键就报错（不静默新建）
 patch_set() {
   local key="$1" val="$2"
   [ -f "$PATCH" ] || { echo "[错误] 配置文件不存在: $PATCH" >&2; return 1; }
@@ -92,18 +134,257 @@ patch_set() {
     return 1
   fi
 
-  # 用 python 做替换，避免 sed 对特殊字符的转义问题
+  # 用 python 做原子替换，避免 sed 对特殊字符的转义问题与半写破坏
   python3 - "$PATCH" "$key" "$val" <<'PY'
-import re, sys, pathlib
+import os, re, sys, pathlib, tempfile
 path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
 p = pathlib.Path(path)
+st = p.stat()
 text = p.read_text(encoding='utf-8')
 pat = re.compile(r'^([ \t]*)' + re.escape(key) + r':[ \t]*[^\n#]*(#[^\n]*)?$', re.M)
-new, n = pat.subn(lambda m: f"{m.group(1)}{key}: {val}", text, count=1)
+new, n = pat.subn(lambda m: f"{m.group(1)}{key}: {val}" + (f" {m.group(2)}" if m.group(2) else ""), text, count=1)
 if n == 0:
     sys.exit(f"未匹配到键 {key}")
-p.write_text(new, encoding='utf-8')
+fd, tmp = tempfile.mkstemp(prefix='.patch-', dir=str(p.parent))
+try:
+    os.fchmod(fd, st.st_mode & 0o777)
+    if os.geteuid() == 0:
+        try:
+            os.fchown(fd, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(new)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
 print(f"已设置 {key} = {val}")
+PY
+}
+
+# 安全更新 im-qqbot 访问控制列表（兼容流式 [...]、多行流式与多行块 - ...，原子写入，PyYAML 存在时做往返校验）
+patch_update_access() {
+  local list_key="$1" mode_key="$2" op="$3"
+  shift 3
+  [ -f "$PATCH" ] || { echo "[错误] 配置文件不存在: $PATCH" >&2; return 1; }
+  python3 - "$PATCH" "$list_key" "$mode_key" "$op" "$@" <<'PY'
+import os, re, sys, pathlib, tempfile
+
+path, list_key, mode_key, op, new_ids = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
+p = pathlib.Path(path)
+st = p.stat()
+text = p.read_text(encoding='utf-8')
+
+yaml = None
+Loader = Dumper = None
+try:
+    import yaml as _yaml
+    yaml = _yaml
+    class _Loader(yaml.SafeLoader):
+        pass
+    _Loader.yaml_implicit_resolvers = {
+        k: [x for x in v if x[0] != 'tag:yaml.org,2002:bool']
+        for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    _Loader.add_implicit_resolver('tag:yaml.org,2002:bool', re.compile(r'^(?:true|false|True|False|TRUE|FALSE)$'), list('tTfF'))
+    class _Dumper(yaml.SafeDumper):
+        pass
+    def _rep_str(dumper, value):
+        return dumper.represent_scalar('tag:yaml.org,2002:str', value, style='"' if any(c in value for c in '\r\x85\u2028\u2029') else None)
+    _Dumper.add_representer(str, _rep_str)
+    Loader, Dumper = _Loader, _Dumper
+except ImportError:
+    pass
+
+def walk_plugins(rows):
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        yield row
+        for k in ('insert', 'config'):
+            if isinstance(row.get(k), list):
+                yield from walk_plugins(row[k])
+        conf = row.get('config')
+        if isinstance(conf, dict) and isinstance(conf.get('plugins'), list):
+            yield from walk_plugins(conf['plugins'])
+
+def find_plugin(rows, pid):
+    found = [r for r in walk_plugins(rows) if r.get('id') == pid]
+    return found[0] if len(found) == 1 else None
+
+orig_persona = None
+orig_list = None
+if yaml is not None:
+    parsed_orig = yaml.load(text, Loader=Loader)
+    if not isinstance(parsed_orig, list):
+        sys.exit("运行配置不是有效的插件列表")
+    qq_row = find_plugin(parsed_orig, 'im-qqbot')
+    if not qq_row or not isinstance(qq_row.get('config'), dict) or not isinstance(qq_row['config'].get('access'), dict):
+        sys.exit("配置中找不到唯一的 im-qqbot access 段")
+    access = qq_row['config']['access']
+    if list_key not in access:
+        sys.exit(f"配置中找不到键 {list_key}")
+    raw_existing = access.get(list_key) or []
+    if not isinstance(raw_existing, list):
+        sys.exit(f"{list_key} 不是列表")
+    orig_list = [str(x) for x in raw_existing]
+    p_row = find_plugin(parsed_orig, 'persona')
+    if p_row and isinstance(p_row.get('config'), dict) and isinstance(p_row['config'].get('prefix'), str):
+        orig_persona = p_row['config']['prefix'].encode('utf-8')
+
+def parse_flow_items(flow_str):
+    s = flow_str.strip()
+    if s.startswith('[') and s.endswith(']'):
+        inner = s[1:-1].strip()
+        if not inner:
+            return []
+        return [x.strip().strip("'\"") for x in inner.split(',') if x.strip()]
+    return []
+
+def surgical_update(src_text):
+    lines = src_text.splitlines(keepends=True)
+    key_pat = re.compile(r'^([ \t]*)' + re.escape(list_key) + r':[ \t]*(.*)$')
+    matches = [i for i, ln in enumerate(lines) if key_pat.match(ln.rstrip('\r\n'))]
+    if len(matches) != 1:
+        return None, None
+    idx = matches[0]
+    eol = '\r\n' if lines[idx].endswith('\r\n') else '\n'
+    m = key_pat.match(lines[idx].rstrip('\r\n'))
+    indent_str = m.group(1)
+    indent = len(indent_str)
+    rest_raw = m.group(2)
+    rest = re.sub(r'[ \t]*#.*$', '', rest_raw).strip()
+
+    end_idx = idx + 1
+    existing = []
+    if rest:
+        if rest.startswith('['):
+            if ']' in rest:
+                bracket_end = rest.find(']')
+                existing = parse_flow_items(rest[:bracket_end + 1])
+            else:
+                buf = [rest]
+                closed = False
+                for j in range(idx + 1, len(lines)):
+                    part = re.sub(r'[ \t]*#.*$', '', lines[j].rstrip('\r\n')).strip()
+                    buf.append(part)
+                    end_idx = j + 1
+                    if ']' in part:
+                        closed = True
+                        break
+                if not closed:
+                    return None, None
+                joined = ' '.join(buf)
+                existing = parse_flow_items(joined[:joined.find(']') + 1])
+        else:
+            return None, None
+    else:
+        # Consume block-style list items (- '...') beneath list_key (same or greater indent)
+        j = idx + 1
+        while j < len(lines):
+            raw = lines[j].rstrip('\r\n')
+            stripped = raw.strip()
+            if not stripped or stripped.startswith('#'):
+                # Only consume blank/comment lines if another list item follows
+                k = j + 1
+                while k < len(lines) and (not lines[k].strip() or lines[k].strip().startswith('#')):
+                    k += 1
+                if k < len(lines):
+                    next_raw = lines[k].rstrip('\r\n')
+                    next_indent = len(next_raw) - len(next_raw.lstrip(' \t'))
+                    if next_indent >= indent and re.match(r'^[ \t]*-(?:[ \t]+.*)?$', next_raw):
+                        j += 1
+                        continue
+                break
+            li = len(raw) - len(raw.lstrip(' \t'))
+            if li < indent:
+                break
+            mm = re.match(r'^[ \t]*-(?:[ \t]+(.*))?$', raw)
+            if not mm:
+                break
+            val = re.sub(r'[ \t]*#.*$', '', (mm.group(1) or '')).strip().strip("'\"")
+            if val:
+                existing.append(val)
+            j += 1
+            end_idx = j
+
+    if orig_list is not None:
+        existing = list(orig_list)
+
+    if op == 'append':
+        items = list(existing)
+        for item in new_ids:
+            if item not in items:
+                items.append(item)
+    elif op == 'replace':
+        items = list(dict.fromkeys(new_ids))
+    else:
+        sys.exit(f"未知操作 {op}")
+
+    rendered_list = '[' + ', '.join(f"'{i}'" for i in items) + ']'
+    lines[idx:end_idx] = [f"{indent_str}{list_key}: {rendered_list}{eol}"]
+    updated = ''.join(lines)
+
+    mode_pat = re.compile(r'^([ \t]*)' + re.escape(mode_key) + r':[ \t]*\S+([ \t]*#[^\n]*)?$', re.M)
+    updated, mn = mode_pat.subn(lambda mm: f"{mm.group(1)}{mode_key}: allowlist{mm.group(2) or ''}", updated, count=1)
+    if mn != 1:
+        return None, None
+    return updated, items
+
+updated, expected_items = surgical_update(text)
+if updated is None:
+    if yaml is None:
+        sys.exit(f"未找到唯一且受支持的 {list_key} / {mode_key} 配置段，拒绝修改")
+    parsed = yaml.load(text, Loader=Loader)
+    qq_row = find_plugin(parsed, 'im-qqbot')
+    access = qq_row['config']['access']
+    if op == 'append':
+        expected_items = list(orig_list)
+        for item in new_ids:
+            if item not in expected_items:
+                expected_items.append(item)
+    else:
+        expected_items = list(dict.fromkeys(new_ids))
+    access[list_key] = expected_items
+    access[mode_key] = 'allowlist'
+    updated = yaml.dump(parsed, Dumper=Dumper, allow_unicode=True, sort_keys=False, width=100000)
+
+if yaml is not None:
+    reparsed = yaml.load(updated, Loader=Loader)
+    if not isinstance(reparsed, list):
+        sys.exit("修改后 YAML 校验失败")
+    qq_after = find_plugin(reparsed, 'im-qqbot')
+    if not qq_after or qq_after.get('config', {}).get('access', {}).get(list_key) != expected_items:
+        sys.exit(f"修改后 {list_key} 校验不一致，已拒绝写入")
+    if qq_after.get('config', {}).get('access', {}).get(mode_key) != 'allowlist':
+        sys.exit(f"修改后 {mode_key} 校验不一致，已拒绝写入")
+    if orig_persona is not None:
+        p_after = find_plugin(reparsed, 'persona')
+        if not p_after or p_after.get('config', {}).get('prefix', '').encode('utf-8') != orig_persona:
+            sys.exit("人格字节校验失败，已拒绝写入")
+
+fd, tmp = tempfile.mkstemp(prefix='.patch-', dir=str(p.parent))
+try:
+    os.fchmod(fd, st.st_mode & 0o777)
+    if os.geteuid() == 0:
+        try:
+            os.fchown(fd, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(updated)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+print(f"已更新 {list_key} 与 {mode_key}: {expected_items}")
 PY
 }
 
@@ -150,7 +431,7 @@ cmd_status() {
 
   printf '%-14s %s\n' "DSH 版本:" "$(run_as_whale "$DSH_BIN" --version 2>"$NULL_DEV" | head -1 || echo unknown)"
   local pver
-  pver=$(python3 -c "import json;print(json.load(open('${PROFILE_DIR}/node_modules/@zaofan/dsh-qqbot/package.json'))['version'])" 2>"$NULL_DEV" || echo "未安装")
+  pver=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["version"])' "${PROFILE_DIR}/node_modules/@zaofan/dsh-qqbot/package.json" 2>"$NULL_DEV" || echo "未安装")
   printf '%-14s %s\n' "插件版本:" "$pver"
   printf '%-14s %s\n' "数据体积:" "$(du -sh "$DATA_ROOT" 2>"$NULL_DEV" | cut -f1 || echo unknown)"
 
@@ -213,36 +494,10 @@ cmd_allow_admin() {
   bak="${PATCH}.bak-$(date +%Y%m%d-%H%M%S)"
   cp -p "$PATCH" "$bak" || return 1
 
-  python3 - "$PATCH" "$openid" <<'PY'
-import re, sys, pathlib
-path, openid = sys.argv[1], sys.argv[2]
-p = pathlib.Path(path); text = p.read_text(encoding='utf-8')
-
-# 定位 im-qqbot 段里的 c2cAllow（可能是 [] 也可能是已有列表）
-m = re.search(r'^([ \t]*)c2cAllow:[ \t]*(\[[^\]]*\])?[ \t]*$', text, re.M)
-if not m:
-    sys.exit("未找到 c2cAllow 键")
-indent = m.group(1)
-cur = (m.group(2) or '[]').strip()
-
-if cur in ('[]', '[ ]', ''):
-    new = f"{indent}c2cAllow: ['{openid}']"
-else:
-    inner = cur[1:-1].strip()
-    items = [x.strip().strip("'\"") for x in inner.split(',') if x.strip()]
-    if openid not in items:
-        items.append(openid)
-    new = f"{indent}c2cAllow: [" + ', '.join(f"'{i}'" for i in items) + "]"
-
-text = text[:m.start()] + new + text[m.end():]
-
-# 同时确保 c2cMode 是 allowlist（若是 disabled 则一并打开，否则白名单不生效）
-text = re.sub(r'^([ \t]*)c2cMode:[ \t]*\S+', lambda mm: f"{mm.group(1)}c2cMode: allowlist", text, count=1, flags=re.M)
-p.write_text(text, encoding='utf-8')
-print("已更新 c2cAllow 与 c2cMode")
-PY
-  local rc=$?
-  if [ $rc -ne 0 ]; then echo "[错误] 写入失败，原文件已备份: $bak"; return 1; fi
+  if ! patch_update_access c2cAllow c2cMode append "$openid"; then
+    echo "[错误] 写入失败，原文件已备份: $bak"
+    return 1
+  fi
 
   echo "新白名单: $(patch_get c2cAllow)"
   sysctl_user restart "$SERVICE"
@@ -327,17 +582,10 @@ cmd_group_mode() {
       done
       local bak
       bak="${PATCH}.bak-$(date +%Y%m%d-%H%M%S)"; cp -p "$PATCH" "$bak"
-      python3 - "$PATCH" "$@" <<'PY'
-import re, sys, pathlib
-path, ids = sys.argv[1], sys.argv[2:]
-p = pathlib.Path(path); text = p.read_text(encoding='utf-8')
-lst = '[' + ', '.join(f"'{i}'" for i in ids) + ']'
-text, n = re.subn(r'^([ \t]*)groupAllow:[ \t]*\[[^\]]*\]', lambda m: f"{m.group(1)}groupAllow: {lst}", text, count=1, flags=re.M)
-if n != 1: sys.exit("未找到唯一 groupAllow，拒绝修改")
-text = re.sub(r'^([ \t]*)groupMode:[ \t]*\S+', lambda m: f"{m.group(1)}groupMode: allowlist", text, count=1, flags=re.M)
-p.write_text(text, encoding='utf-8')
-print("已写入群白名单:", lst)
-PY
+      if ! patch_update_access groupAllow groupMode replace "$@"; then
+        echo "[错误] 写入失败，原文件已备份: $bak" >&2
+        return 1
+      fi
       sysctl_user restart "$SERVICE" && echo "群聊已开启（仅白名单群可触发）"
       ;;
     show)

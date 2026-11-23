@@ -15,10 +15,11 @@ export async function preprocess(ctx,dependencies){
  }).slice(0,config.maxImages||undefined);
  if(!images.length)return;
  const original=String(message.content||'');const notes=[];const overallDeadline=Date.now()+images.length*(config.timeoutMs+20000);
+ const collectWaitMs=Number.isInteger(config.collectWaitMs)&&config.collectWaitMs>=0?config.collectWaitMs:5000;
  for(const [index,image] of images.entries()){
   try{
    if(Date.now()>overallDeadline-2000)throw Error('本条消息视觉处理已达到时间预算');
-   let path=lookup(image.url);const deadline=overallDeadline;
+   let path=lookup(image.url);const deadline=Math.min(overallDeadline,Date.now()+collectWaitMs);
    while(!path&&Date.now()<deadline){await wait(120);path=lookup(image.url)}
    if(!path){if(String(image.content_type||image.contentType||'').startsWith('image'))throw Error('QQ 图片尚未成功落盘，未能识别');continue}
    const result=await analyze(path,{kind:'inbound',deadline:overallDeadline});

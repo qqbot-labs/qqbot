@@ -41,11 +41,16 @@ export function createBridge({client, handler, token, data, now=Date.now, ttl=30
       }catch{return send(404,{reason:'qr_not_ready'})}
     }
     if(req.method!=='POST')return send(405,{reason:'method_not_allowed'});
+    let body: any;
     try {
       const buffers:Buffer[]=[];let size=0;
       for await(const chunk of req){size+=chunk.length;if(size>65536)return send(413,{reason:'too_large'});buffers.push(chunk)}
-      const body=buffers.length?JSON.parse(Buffer.concat(buffers).toString('utf8')):{};
-      if(!body||Array.isArray(body)||typeof body!=='object')return send(400,{reason:'invalid_body'});
+      body=buffers.length?JSON.parse(Buffer.concat(buffers).toString('utf8')):{};
+    } catch {
+      return send(400,{reason:'invalid_json'});
+    }
+    if(!body||Array.isArray(body)||typeof body!=='object')return send(400,{reason:'invalid_body'});
+    try {
       if(action==='logout'){
         if(qrRunning)return send(409,{reason:'login_in_progress'});
         invalidate();client.qqNumber=null;client.cookies={};clearQR();
@@ -70,7 +75,7 @@ export function createBridge({client, handler, token, data, now=Date.now, ttl=30
       if(!reads.has(action)&&!writes.has(action))return send(404,{reason:'action_not_allowed'});
       // GET health is read-only. Explicit checks and successful protected API calls refresh evidence.
       if(action==='check_cookie') {
-        await verify();return send(200,{status:'ok',retcode:0,data:{valid:true}});
+        await verify();return send(200,{status:'ok',retcode:0,data:{valid:true,qq:client.qqNumber??null}});
       }
       if(!online())await verify();
       const result=await handler.handle(action,body);

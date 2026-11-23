@@ -121,9 +121,13 @@ export async function run(env) {
   }
   if(existsSync(socket))unlinkSync(socket);
   const server=net.createServer(conn=>{
-    let raw='';conn.setEncoding('utf8');conn.setTimeout(110000,()=>conn.destroy());
-    conn.on('data',chunk=>{raw+=chunk;if(Buffer.byteLength(raw)>32768){conn.destroy();return}if(!raw.includes('\n'))return;
-      conn.pause();chain=chain.catch(()=>{}).then(async()=>{let out;try{out={ok:true,data:await handle(JSON.parse(raw.split('\n')[0]))}}catch(e){out={ok:false,error:String(e.message||e)}}conn.end(JSON.stringify(out)+'\n')});
+    let raw='',handled=false;conn.setEncoding('utf8');conn.setTimeout(110000,()=>conn.destroy());
+    conn.on('data',chunk=>{
+      if(handled)return;
+      raw+=chunk;if(Buffer.byteLength(raw)>32768){handled=true;conn.destroy();return}
+      if(!raw.includes('\n'))return;
+      handled=true;conn.pause();
+      chain=chain.catch(()=>{}).then(async()=>{let out;try{out={ok:true,data:await handle(JSON.parse(raw.split('\n')[0]))}}catch(e){out={ok:false,error:String(e.message||e)}}conn.end(JSON.stringify(out)+'\n')});
     });
     conn.on('error',()=>{});
   });

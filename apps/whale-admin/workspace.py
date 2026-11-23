@@ -35,7 +35,11 @@ def instructions_save(body):
     return {'message':'工作区指令已保存并备份。下一次消息由DSH重新核对加载；当前人格原文保持不变。','instructions':instructions_get()}
 
 def search_get():
-    path=d.ROOT/'etc/search-config.json';enabled=json.loads(path.read_text()).get('enabled') if path.exists() else False
+    path=d.ROOT/'etc/search-config.json'
+    try:
+        parsed=json.loads(path.read_text()) if path.exists() else {}
+        enabled=bool(parsed.get('enabled',False)) if isinstance(parsed,dict) else False
+    except (OSError,ValueError):enabled=False
     events=[];log=d.ROOT/'data/qqwhale/search-calls.jsonl'
     if log.exists():
         for line in log.read_text()[-120000:].splitlines()[-50:]:
@@ -46,8 +50,15 @@ def search_get():
 def search_save(body):
     if set(body)!={'enabled'} or type(body['enabled'])!=bool:raise d.Error('搜索开关格式无效')
     path=d.ROOT/'etc/search-config.json';folder=d.STATE/'search-revisions';folder.mkdir(parents=True,exist_ok=True,mode=0o700)
-    if path.exists():d.shutil.copyfile(path,folder/(d.stamp()+'.json'))
-    d.atomic(path,(json.dumps({**json.loads(path.read_text()),**body})+'\n').encode(),owner=(0,d.pwd.getpwnam('qqwhale').pw_gid));path.chmod(0o640)
+    path.parent.mkdir(parents=True,exist_ok=True)
+    current={}
+    if path.exists():
+        d.shutil.copyfile(path,folder/(d.stamp()+'.json'))
+        try:
+            parsed=json.loads(path.read_text())
+            if isinstance(parsed,dict):current=parsed
+        except (OSError,ValueError):current={}
+    d.atomic(path,(json.dumps({**current,**body})+'\n').encode(),owner=(0,d.pwd.getpwnam('qqwhale').pw_gid));path.chmod(0o640)
     d.audit('search.save');return {'message':'联网搜索设置已保存，立即生效。'}
 
 def search_test(body):

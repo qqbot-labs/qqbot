@@ -90,6 +90,7 @@ BindPaths=/home/qqwhale/whale/etc/private-null:/dev/null
 # --host 127.0.0.1：只监听本机回环，远程管理走 SSH 端口转发（DSH 自身也拒绝 0.0.0.0）。
 # --no-open：无人值守环境不尝试打开浏览器。
 ExecStartPre=/usr/bin/python3 /home/qqwhale/whale/bin/harden-plugin.py --check /home/qqwhale/.dsh/profiles/web/node_modules/@zaofan/dsh-qqbot
+ExecStartPre=/usr/bin/python3 /home/qqwhale/whale/bin/apply-chat-splitter.py --check /home/qqwhale/.dsh/profiles/web/node_modules/@zaofan/dsh-qqbot
 ExecStart=/home/qqwhale/whale/app/node_modules/.bin/dsh web --no-open --port 3080 --host 127.0.0.1
 
 # --- 重启与停止 -------------------------------------------------------------
